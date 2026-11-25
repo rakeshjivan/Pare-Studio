@@ -7,32 +7,38 @@ import AppKit
 
 // MARK: - App
 
-/// Pare Studio inside Pare Studio: downloading, crop & trim, compress and GIFs.
+/// Passes a finished download to the editor tab.
+@MainActor
+final class ReelsNav: ObservableObject {
+    static let shared = ReelsNav()
+    @Published var tab = 0
+    @Published var pendingEdit: URL?
+}
+
+/// Pare Reels inside Pare Studio: Download · Edit Video · Pictures to GIF.
 struct ReelsHome: View {
     /// One download model for the whole app, so downloads keep going while you use other tools.
     @MainActor static let model = DownloadModel()
     @MainActor static var didSetup = false
     @ObservedObject private var model = ReelsHome.model
-    @State private var tab = 0
-    var startTab: Int = 0
+    @ObservedObject private var nav = ReelsNav.shared
+
+    /// Opens a file in Edit Video.
+    @MainActor static func edit(_ url: URL) {
+        ReelsNav.shared.pendingEdit = url
+        ReelsNav.shared.tab = 1
+    }
 
     var body: some View {
-        TabView(selection: $tab) {
+        TabView(selection: $nav.tab) {
             ContentView()
                 .tabItem { Label("Download", systemImage: "arrow.down.circle") }.tag(0)
             CropView()
-                .tabItem { Label("Crop & Trim", systemImage: "crop") }.tag(1)
-            CompressView()
-                .tabItem { Label("Compress", systemImage: "arrow.down.right.and.arrow.up.left") }.tag(2)
-            CropView(mode: .gif)
-                .tabItem { Label("Video to GIF", systemImage: "photo.stack") }.tag(3)
+                .tabItem { Label("Edit Video", systemImage: "slider.horizontal.3") }.tag(1)
             ImagesToGIFView()
-                .tabItem { Label("Images to GIF", systemImage: "photo.on.rectangle.angled") }.tag(4)
-            CropView(mode: .frame)
-                .tabItem { Label("Frame", systemImage: "circle.dashed.rectangle") }.tag(5)
+                .tabItem { Label("Pictures to GIF", systemImage: "photo.on.rectangle.angled") }.tag(2)
         }
         .environmentObject(model)
-        .onAppear { tab = startTab }
         .task {
             guard !ReelsHome.didSetup else { return }
             ReelsHome.didSetup = true
@@ -142,6 +148,9 @@ struct DownloadItem: Identifiable {
     var credentials = Credentials()
     var needsFinder = false
     var direct: DirectJob?
+    /// The saved file, once finished (so it can be opened in the editor).
+    var file: URL?
+    var startedAt: Date?
 }
 
 // MARK: - Tools (yt-dlp, deno, ffmpeg)
@@ -646,6 +655,7 @@ final class DownloadModel: ObservableObject {
     private func download(index i: Int) async {
         items[i].status = .downloading
         items[i].detail = "Starting…"
+        items[i].startedAt = Date()
         appendLog("▶︎ \(items[i].url)")
         lastErrors[i] = nil
         let parts = Self.partsDir(for: items[i].id)
@@ -698,6 +708,7 @@ final class DownloadModel: ObservableObject {
             items[i].status = .done
             items[i].progress = 1
             items[i].detail = note
+            items[i].file = finishedFile(index: i)
         } else {
             let err = lastErrors[i] ?? "The download didn't finish. See the log."
             items[i].status = .failed
@@ -715,6 +726,22 @@ final class DownloadModel: ObservableObject {
                 items[i].detail = friendly(err)
             }
         }
+    }
+
+    /// Where a finished download ended up: the file the downloader reported, or else the newest
+    /// video in the download folder saved since this download started.
+    private func finishedFile(index i: Int) -> URL? {
+        let fm = FileManager.default
+        if let p = lastFiles[i], fm.fileExists(atPath: p) { return URL(fileURLWithPath: p) }
+        let since = (items[i].startedAt ?? Date()).addingTimeInterval(-2)
+        let exts: Set<String> = ["mp4", "mov", "m4v", "webm", "mkv", "mp3", "m4a"]
+        let files = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return files.filter { exts.contains($0.pathExtension.lowercased()) }
+            .compactMap { u -> (URL, Date)? in
+                guard let d = try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate, d >= since else { return nil }
+                return (u, d)
+            }
+            .max { $0.1 < $1.1 }?.0
     }
 
     private func runYtdlp(_ args: [String], index i: Int) async -> Int32 {
@@ -1029,7 +1056,8 @@ struct ContentView: View {
             List(model.items) { item in
                 ItemRow(item: item, canUnlock: !model.isRunning,
                         onUnlock: { model.authItemID = item.id },
-                        onFind: { model.openFinder(itemID: item.id) })
+                        onFind: { model.openFinder(itemID: item.id) },
+                        onEdit: { ReelsHome.edit($0) })
             }
             .sheet(item: $model.finderTarget) { target in
                 FinderSheet(target: target,
@@ -1136,6 +1164,7 @@ struct ItemRow: View {
     var canUnlock = true
     var onUnlock: () -> Void = {}
     var onFind: () -> Void = {}
+    var onEdit: (URL) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1148,6 +1177,15 @@ struct ItemRow: View {
                 }
                 if item.needsAuth {
                     Button("Unlock…", action: onUnlock).controlSize(.small).disabled(!canUnlock)
+                }
+                if item.status == .done, let f = item.file {
+                    if !["mp3", "m4a"].contains(f.pathExtension.lowercased()) {
+                        Button { onEdit(f) } label: { Label("Edit…", systemImage: "slider.horizontal.3") }
+                            .controlSize(.small)
+                            .help("Trim, crop, blur, speed up or make it smaller")
+                    }
+                    Button { NSWorkspace.shared.activateFileViewerSelecting([f]) } label: { Image(systemName: "folder") }
+                        .controlSize(.small).help("Show in Finder")
                 }
                 Text(item.status.label).font(.caption).foregroundStyle(.secondary)
             }

@@ -1024,9 +1024,18 @@ final class CropModel: ObservableObject {
 // MARK: - View
 
 struct CropView: View {
-    enum Mode { case edit, gif, frame }
-    var mode: Mode = .edit
+    /// What Save makes. All edits (trim, crop, blur, speed) apply to every choice, in one pass.
+    enum Mode: String, CaseIterable, Identifiable {
+        case edit = "Video", compress = "Smaller file", gif = "GIF", frame = "Framed (bubble)"
+        var id: String { rawValue }
+        var icon: String {
+            switch self { case .edit: return "film"; case .compress: return "arrow.down.right.and.arrow.up.left"; case .gif: return "photo.stack"; case .frame: return "circle.dashed.rectangle" }
+        }
+    }
+    @State private var mode: Mode = .edit
     @StateObject private var model = CropModel()
+    @ObservedObject private var nav = ReelsNav.shared
+    @ObservedObject private var downloads = ReelsHome.model
     @State private var gifWidth = 640       // 0 = full size
     @State private var gifFPS = 15
 
@@ -1055,9 +1064,18 @@ struct CropView: View {
                     CropCanvas(model: model, image: img)
                         .padding(14)
                 } else {
-                    VStack(spacing: 8) {
-                        Image(systemName: "crop").font(.system(size: 34)).foregroundStyle(.secondary)
+                    VStack(spacing: 10) {
+                        Image(systemName: "slider.horizontal.3").font(.system(size: 34)).foregroundStyle(.secondary)
                         Text("Drop a video here, or click Open Video…").foregroundStyle(.secondary)
+                        Text("Then trim, crop, blur and change the speed, all together, and save once as a video, a smaller file, a GIF or a framed bubble.")
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+                        let recent = downloads.items.compactMap(\.file).filter { !["mp3", "m4a"].contains($0.pathExtension.lowercased()) }.suffix(3)
+                        if !recent.isEmpty {
+                            Text("Recent downloads").font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 6)
+                            ForEach(Array(recent), id: \.self) { f in
+                                Button(f.lastPathComponent) { Task { await model.open(f) } }.buttonStyle(.link)
+                            }
+                        }
                     }
                 }
             }
@@ -1100,6 +1118,21 @@ struct CropView: View {
                     Text("Blur boxes stay in the same spot for the whole video; they don't follow a face that moves.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Divider()
+                HStack(spacing: 12) {
+                    Text("Save as").font(.headline)
+                    Picker("Save as", selection: $mode) {
+                        ForEach(Mode.allCases) { m in Label(m.rawValue, systemImage: m.icon).tag(m) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 520)
+                    .disabled(model.busy)
+                    Spacer()
+                }
+                Label(summary, systemImage: "checklist")
+                    .font(.callout)
+                    .foregroundStyle(summary.hasPrefix("No changes") ? .secondary : .primary)
                 if mode == .frame {
                     HStack(spacing: 14) {
                         Picker("Frame", selection: $model.frameShape) {
@@ -1130,6 +1163,9 @@ struct CropView: View {
                          ? String(format: "This GIF would be %.0f seconds long. GIFs get large quickly: use Set Start and Set End to pick a short moment (under about 15 seconds).", len)
                          : "Use Set Start and Set End to pick the moment. Crop, blur and speed all apply to the GIF. It loops forever and has no sound.")
                         .font(.caption).foregroundStyle(len > 20 ? .orange : .secondary)
+                } else if mode == .compress {
+                    Text("Makes the smallest file that still looks the same (HEVC, using your Mac's video hardware). A few quality levels are tested on samples first. Any trim, crop, blur and speed are done in the same pass.")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else {
                 Text(model.isCropped || model.hasEffects
                      ? "Saving rebuilds the video: cropped-out and blurred areas are permanently removed, and cuts are exact. This takes a few minutes for long videos."
@@ -1166,16 +1202,18 @@ struct CropView: View {
                         .frame(width: 190)
                         Button("Make GIF") { model.makeGIF(width: gifWidth == 0 ? nil : gifWidth, fps: gifFPS) }
                             .keyboardShortcut(.defaultAction)
-                    } else {
-                        Button("Compress & Save") { model.save(.fast, compress: true) }
+                    } else if mode == .compress {
+                        Button("Save Smaller File") { model.save(.fast, compress: true) }
+                            .keyboardShortcut(.defaultAction)
                             .alert("This video can't be made any smaller", isPresented: $model.offerPlainSave) {
                                 Button("Save Without Compressing") { model.save(.fast) }
                                 Button("Cancel", role: .cancel) {}
                             } message: {
                                 Text("It's already compressed about as far as it can go without visible loss. Save your crop and trim anyway, without compressing?")
                             }
-                            .help("Saves your crop and trim as the smallest file that still looks the same (HEVC).")
-                        Button("Save") { model.save(.fast) }
+                            .help("Saves your edits as the smallest file that still looks the same (HEVC).")
+                    } else {
+                        Button("Save Video") { model.save(.fast) }
                             .keyboardShortcut(.defaultAction)
                             .help("Rebuilds the video with your Mac's video hardware: the cropped area is permanently removed and trims are exact.")
                     }
@@ -1194,7 +1232,39 @@ struct CropView: View {
             }
         }
         .padding(20)
-        .onAppear { model.frameMode = mode == .frame }
+        .onAppear {
+            model.frameMode = mode == .frame
+            openPending()
+        }
+        .onChange(of: mode) { _, m in model.frameMode = m == .frame }
+        .onChange(of: nav.pendingEdit) { _, _ in openPending() }
+    }
+
+    /// A download sent here with "Edit…".
+    private func openPending() {
+        guard let u = nav.pendingEdit, !model.busy else { return }
+        nav.pendingEdit = nil
+        Task { await model.open(u) }
+    }
+
+    /// One line saying everything that Save will do.
+    private var summary: String {
+        var parts: [String] = []
+        if model.isTrimmed { parts.append("Trim \(timeString(model.trimStart))–\(timeString(model.trimEnd))") }
+        if model.isCropped && mode != .frame {
+            let r = model.pixelRect
+            parts.append("Crop \(Int(r.width))×\(Int(r.height))")
+        }
+        if !model.blurs.isEmpty { parts.append("\(model.blurs.count) blur area\(model.blurs.count == 1 ? "" : "s")") }
+        if abs(model.speed - 1) > 0.001 { parts.append(String(format: "%g× speed", model.speed)) }
+        switch mode {
+        case .edit: break
+        case .compress: parts.append("smaller file")
+        case .gif: parts.append("GIF")
+        case .frame: parts.append("framed \(model.frameShape.rawValue.lowercased())")
+        }
+        if parts.isEmpty { return "No changes yet: trim, crop, add a blur, or pick Smaller file." }
+        return "Save will: " + parts.joined(separator: " · ")
     }
 
     private func timeString(_ s: Double) -> String {

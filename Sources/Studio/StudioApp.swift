@@ -74,7 +74,7 @@ enum Screen: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .home: return "Pare Studio"
-        case .download: return "Download a Video"
+        case .download: return "Download & Edit Video"
         case .guide: return "Make a How-To Guide"
         case .videoSlides: return "Turn a Video into Slides"
         case .fitSlides: return "Put Slides to a Recording"
@@ -107,7 +107,7 @@ enum Screen: String, CaseIterable, Identifiable {
     var question: String {
         switch self {
         case .home: return ""
-        case .download: return "Save a video from a website"
+        case .download: return "Save a video, or trim, crop, blur and shrink one"
         case .guide: return "Show someone how to do something on a Mac"
         case .videoSlides: return "Get the slides out of a recorded talk"
         case .fitSlides: return "I have a recording and the slide deck"
@@ -119,7 +119,7 @@ enum Screen: String, CaseIterable, Identifiable {
         switch self {
         case .home: return ""
         case .download:
-            return "Download from YouTube, Vimeo, webinars, Zoom and more. Then crop, trim, compress or make a GIF."
+            return "Download from YouTube, Vimeo, webinars, Zoom and more. Edit any video in one go: trim, crop, blur, speed, then save as a video, a smaller file, a GIF or a framed bubble."
         case .guide:
             return "Record yourself doing a task in any app. Get a step-by-step guide (PDF, Word, web page), a narrated tutorial video, or a Camtasia project."
         case .videoSlides:

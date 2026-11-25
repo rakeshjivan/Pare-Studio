@@ -4,7 +4,7 @@ One Mac app for video, guides, slides and transcripts. The home screen asks what
 
 | Tool | What it does |
 |---|---|
-| **Download a Video** | Save videos from YouTube, Vimeo, webinars, Zoom and more. Crop & trim, compress, and make GIFs (from Pare Reels). |
+| **Download & Edit Video** | Save videos from YouTube, Vimeo, webinars, Zoom and more. **Edit Video** does trim, crop, blur and speed together, then saves once as a video, a smaller file, a GIF or a framed bubble. Each download has an **Edit…** button (from Pare Reels). |
 | **Make a How-To Guide** | Record yourself doing a task in any app. Get a step-by-step guide (PDF, Word, web page, GIF), a narrated tutorial video, or a Camtasia project (from Pare Guide). |
 | **Turn a Video into Slides** | Finds every slide in a recorded talk or webinar. Saves a PowerPoint (what was said becomes the speaker notes), a PDF, the slide images, a transcript, or a Camtasia project with the slides timed to the sound. |
 | **Put Slides to a Recording** | You have the recording and the slide deck. Pare Studio listens and puts each slide on screen at the right moment, for a batch of recordings, then exports Camtasia projects or MP4s (from Pare Slides). |
