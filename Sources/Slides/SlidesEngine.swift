@@ -503,7 +503,44 @@ enum Audio {
 // MARK: - Speech to text (on this Mac)
 
 enum Transcriber {
-    static func transcribe(_ url: URL) async throws -> [Line] {
+    /// Transcribes a recording. Longer recordings are cut at quiet moments into pieces that are
+    /// transcribed at the same time on several cores, then joined back with the right times.
+    static func transcribe(_ url: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws -> [Line] {
+        let dur = (try? AVAudioFile(forReading: url)).map { Double($0.length) / $0.processingFormat.sampleRate } ?? 0
+        let lanes = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
+        guard dur > 240 else { return try await transcribeWhole(url) }
+        if #available(macOS 26.0, *) { try? await prepareModern() }
+        let pieces: [(url: URL, offset: Double)]
+        do { pieces = try await Task.detached { try split(url, duration: dur, into: lanes) }.value }
+        catch { return try await transcribeWhole(url) }
+        defer { for p in pieces { try? FileManager.default.removeItem(at: p.url) } }
+        guard pieces.count > 1 else { return try await transcribeWhole(url) }
+
+        let done = Counter()
+        var results = [Int: [Line]]()
+        var failed: [Int] = []
+        await withTaskGroup(of: (Int, [Line]?).self) { group in
+            for (i, p) in pieces.enumerated() {
+                group.addTask {
+                    let lines = try? await transcribeWhole(p.url)
+                    progress?(Double(done.add()) / Double(pieces.count))
+                    return (i, lines?.map { $0.shifted(by: p.offset) })
+                }
+            }
+            for await (i, lines) in group {
+                if let lines { results[i] = lines } else { failed.append(i) }
+            }
+        }
+        // Any piece that failed alongside the others gets a second try on its own.
+        for i in failed {
+            if let lines = try? await transcribeWhole(pieces[i].url) { results[i] = lines.map { $0.shifted(by: pieces[i].offset) } }
+        }
+        if results.isEmpty { return try await transcribeWhole(url) }
+        return pieces.indices.flatMap { results[$0] ?? [] }.sorted { $0.start < $1.start }
+    }
+
+    /// One file, one engine, start to finish.
+    static func transcribeWhole(_ url: URL) async throws -> [Line] {
         if #available(macOS 26.0, *) {
             do {
                 let l = try await modern(url)
@@ -513,6 +550,78 @@ enum Transcriber {
             }
         }
         return try await legacy(url)
+    }
+
+    /// Downloads the speech model once, before the pieces start together.
+    @available(macOS 26.0, *)
+    static func prepareModern() async throws {
+        var locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-AU"))
+        if locale == nil { locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) }
+        if locale == nil { locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) }
+        guard let locale else { return }
+        let t = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [.audioTimeRange])
+        if let install = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
+            try await install.downloadAndInstall()
+        }
+    }
+
+    /// Cuts the audio into about `n` pieces, each cut placed at the quietest moment near its target.
+    static func split(_ url: URL, duration: Double, into n: Int) throws -> [(url: URL, offset: Double)] {
+        let file = try AVAudioFile(forReading: url)
+        let fmt = file.processingFormat
+        let rate = fmt.sampleRate
+        // Loudness every 0.1 s.
+        let win = AVAudioFrameCount(rate / 10)
+        var env: [Float] = []
+        env.reserveCapacity(Int(duration * 10) + 10)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: win * 50) else { throw PGError("Couldn't read the sound.") }
+        while file.framePosition < file.length {
+            try file.read(into: buf, frameCount: win * 50)
+            guard let ch = buf.floatChannelData, buf.frameLength > 0 else { break }
+            let frames = Int(buf.frameLength)
+            var i = 0
+            while i < frames {
+                let end = min(frames, i + Int(win))
+                var sum: Float = 0
+                for j in i..<end { let v = ch[0][j]; sum += v * v }
+                env.append((sum / Float(max(1, end - i))).squareRoot())
+                i = end
+            }
+        }
+        let piece = max(120.0, duration / Double(n))
+        var cuts: [Double] = [0]
+        var target = piece
+        while target < duration - 60 {
+            // Quietest 0.1 s within 15 s of the target.
+            let lo = max(0, Int((target - 15) * 10)), hi = min(env.count - 1, Int((target + 15) * 10))
+            var best = Int(target * 10)
+            if lo < hi { best = (lo...hi).min { env[$0] < env[$1] } ?? best }
+            let t = Double(best) / 10
+            if t - (cuts.last ?? 0) > 30 { cuts.append(t) }
+            target = t + piece
+        }
+        cuts.append(duration)
+        // Write each piece as its own file.
+        var out: [(URL, Double)] = []
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("PareStudioPieces-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for k in 0..<(cuts.count - 1) {
+            let a = AVAudioFramePosition(cuts[k] * rate), b = min(file.length, AVAudioFramePosition(cuts[k + 1] * rate))
+            guard b > a else { continue }
+            let dest = dir.appendingPathComponent("piece-\(k).caf")
+            let w = try AVAudioFile(forWriting: dest, settings: fmt.settings, commonFormat: fmt.commonFormat, interleaved: fmt.isInterleaved)
+            file.framePosition = a
+            var left = AVAudioFrameCount(b - a)
+            while left > 0 {
+                let want = min(left, win * 50)
+                try file.read(into: buf, frameCount: want)
+                if buf.frameLength == 0 { break }
+                try w.write(from: buf)
+                left -= min(left, buf.frameLength)
+            }
+            out.append((dest, cuts[k]))
+        }
+        return out
     }
 
     /// macOS 26's speech engine: handles long recordings well.
@@ -563,7 +672,7 @@ enum Transcriber {
             SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) }
         }
         guard auth == .authorized else {
-            throw PGError("Pare Slides needs Speech Recognition permission: System Settings › Privacy & Security › Speech Recognition.")
+            throw PGError("Pare Studio needs Speech Recognition permission: System Settings › Privacy & Security › Speech Recognition.")
         }
         guard let rec = SFSpeechRecognizer(locale: Locale(identifier: "en-AU")) ?? SFSpeechRecognizer(), rec.isAvailable else {
             throw PGError("Speech recognition isn't available right now.")
@@ -608,6 +717,21 @@ enum Transcriber {
         }
         if !cur.isEmpty { out.append(Line(start: s, end: e, text: cur.joined(separator: " "), words: tw)) }
         return out
+    }
+}
+
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func add() -> Int { lock.withLock { n += 1; return n } }
+}
+
+extension Line {
+    func shifted(by t: Double) -> Line {
+        var l = self
+        l.start += t; l.end += t
+        l.words = words.map { TimedWord(text: $0.text, start: $0.start + t) }
+        return l
     }
 }
 

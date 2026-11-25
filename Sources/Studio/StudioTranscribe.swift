@@ -69,6 +69,10 @@ final class TranscribeModel: ObservableObject {
         jobs = []; selected = nil; problem = nil; message = nil
     }
 
+    func setState(_ id: UUID, _ st: TranscriptJob.State) {
+        if let i = jobs.firstIndex(where: { $0.id == id }), case .working = jobs[i].state { jobs[i].state = st }
+    }
+
     private func update(_ id: UUID, _ f: (inout TranscriptJob) -> Void) {
         if let i = jobs.firstIndex(where: { $0.id == id }) { f(&jobs[i]) }
     }
@@ -88,7 +92,11 @@ final class TranscribeModel: ObservableObject {
                         update(id) { $0.duration = d }
                     }
                     update(id) { $0.state = .working("Listening (on this Mac)… long recordings take a while.") }
-                    let lines = try await Transcriber.transcribe(wav)
+                    let lines = try await Transcriber.transcribe(wav) { f in
+                        Task { @MainActor in
+                            TranscribeModel.shared.setState(id, .working("Listening (on this Mac)… \(Int(f * 100))%"))
+                        }
+                    }
                     try? FileManager.default.removeItem(at: wav)
                     guard !lines.isEmpty else { throw PGError("No speech was found.") }
                     update(id) { $0.lines = lines; $0.state = .done }
