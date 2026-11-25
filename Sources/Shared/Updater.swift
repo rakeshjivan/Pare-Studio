@@ -104,34 +104,63 @@ final class Updater: ObservableObject {
         }
     }
 
+    /// True when macOS is running this copy from a hidden read-only location (opened straight from Downloads).
+    var isTranslocated: Bool { Bundle.main.bundlePath.contains("/AppTranslocation/") }
+
+    static let logURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Pare Studio update.log")
+
     /// Replaces this app with the downloaded one once it has quit; optionally reopens it.
+    /// The swap runs in a separate, detached helper so nothing that closes with the app can stop it.
     func install(relaunch: Bool) {
         guard let newApp = stagedApp else { return }
-        stagedApp = nil
         let oldApp = Bundle.main.bundleURL
-        guard FileManager.default.isWritableFile(atPath: oldApp.deletingLastPathComponent().path) else {
-            NSWorkspace.shared.open(Self.releasesPage)   // can't replace it here: send you to the download page
+        let fm = FileManager.default
+        if isTranslocated || !fm.isWritableFile(atPath: oldApp.deletingLastPathComponent().path) {
+            statusText = isTranslocated
+                ? "Move Pare Studio into Applications, open it from there, then update."
+                : "Pare Studio can't replace itself in this folder. Move it into Applications."
+            if relaunch { NSWorkspace.shared.activateFileViewerSelecting([oldApp]) }
             return
         }
+        stagedApp = nil
         let pid = ProcessInfo.processInfo.processIdentifier
         let script = """
-        while kill -0 \(pid) 2>/dev/null; do sleep 0.3; done
+        exec >> "$LOG" 2>&1
+        echo "$(date): updating $OLD from $NEW (waiting for pid \(pid) to quit)"
+        n=0
+        while kill -0 \(pid) 2>/dev/null; do sleep 0.3; n=$((n+1)); [ $n -gt 400 ] && { echo "app didn't quit; giving up"; exit 1; }; done
         rm -rf "$OLD.previous"
-        if mv "$OLD" "$OLD.previous" && mv "$NEW" "$OLD"; then
-          rm -rf "$OLD.previous"
-        elif [ -d "$OLD.previous" ] && [ ! -d "$OLD" ]; then
-          mv "$OLD.previous" "$OLD"
+        if mv "$OLD" "$OLD.previous" && /usr/bin/ditto "$NEW" "$OLD"; then
+          rm -rf "$OLD.previous" "$NEW"
+          /usr/bin/xattr -dr com.apple.quarantine "$OLD" 2>/dev/null
+          echo "installed"
+        else
+          echo "swap failed; putting the old version back"
+          [ -d "$OLD.previous" ] && { rm -rf "$OLD"; mv "$OLD.previous" "$OLD"; }
         fi
-        if [ "$RELAUNCH" = "1" ]; then open "$OLD"; fi
+        if [ "$RELAUNCH" = "1" ]; then /usr/bin/open "$OLD"; fi
         """
+        let scriptURL = fm.temporaryDirectory.appendingPathComponent("pare-studio-update-\(UUID().uuidString.prefix(6)).sh")
+        try? script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try? fm.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // nohup + & detaches the helper from Pare Studio, so it keeps running after the app quits.
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", script]
+        p.arguments = ["-c", "/usr/bin/nohup /bin/sh \"$SCRIPT\" >/dev/null 2>&1 &"]
         p.environment = ["OLD": oldApp.path, "NEW": newApp.path, "RELAUNCH": relaunch ? "1" : "0",
+                         "SCRIPT": scriptURL.path, "LOG": Self.logURL.path,
                          "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
-        try? p.run()
+        do {
+            try p.run()
+            p.waitUntilExit()
+        } catch {
+            stagedApp = newApp
+            statusText = "Couldn't start the update: \(error.localizedDescription)"
+            return
+        }
         if relaunch { NSApp.terminate(nil) }
     }
 }
@@ -145,10 +174,12 @@ struct UpdateBanner: View {
         if let build = updater.readyBuild {
             HStack(spacing: 10) {
                 Image(systemName: "arrow.down.app.fill").foregroundStyle(.blue)
-                Text("A new version (build \(build)) is ready. It installs when you quit.")
+                Text(busy ? "A new version (build \(build)) is ready. It installs when the current job finishes and you quit."
+                          : "A new version (build \(build)) is ready. It installs when you quit.")
                 Spacer()
+                if let t = updater.statusText { Text(t).font(.caption).foregroundStyle(.orange) }
                 Button("Restart Now") { updater.install(relaunch: true) }
-                    .disabled(busy)
+                    .help(busy ? "Something is still working. You can restart anyway; unfinished work is lost." : "Quit, update and reopen")
             }
             .font(.callout)
             .padding(10)
@@ -171,7 +202,7 @@ struct UpdateButton: View {
             Button(updater.readyBuild != nil ? "Restart to Update" : "Check for Updates") {
                 Task { await updater.checkNow() }
             }
-            .disabled(busy || updater.checking || updater.downloading)
+            .disabled((busy && updater.readyBuild == nil) || updater.checking || updater.downloading)
         }
     }
 }

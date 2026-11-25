@@ -47,10 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { Updater.shared.install(relaunch: false) }   // first, so nothing below can get in its way
         ReelTools.stopBackgroundJobs()   // never leave ffmpeg/yt-dlp running after the app closes
         MainActor.assumeIsolated { GuideStore.shared.flush() }
         PareVoice.stop()
-        MainActor.assumeIsolated { Updater.shared.install(relaunch: false) }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
