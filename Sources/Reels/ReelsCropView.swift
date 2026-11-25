@@ -55,6 +55,12 @@ final class CropModel: ObservableObject {
     @Published var time: Double = 0
     @Published var trimStart: Double = 0
     @Published var trimEnd: Double = 0
+    /// Parts cut out of the middle (the parts either side are joined).
+    @Published var cuts: [CutRange] = []
+    /// Little pictures along the timeline.
+    @Published var filmstrip: [CGImage?] = []
+    /// While saving a joined copy: name the result after the original.
+    var nameSource: URL?
     @Published var crop = CGRect(x: 0, y: 0, width: 1, height: 1)   // 0...1 of the frame
     @Published var aspect: CropAspect = .free { didSet { applyAspect() } }
     @Published var codec = ""
@@ -78,12 +84,36 @@ final class CropModel: ObservableObject {
 
     var isCropped: Bool { crop.minX > 0.001 || crop.minY > 0.001 || crop.width < 0.999 || crop.height < 0.999 }
     /// Areas to blur (0...1 of the frame), for names, faces or IDs. Blurred for the whole video.
-    @Published var blurs: [CGRect] = []
+    @Published var blurs: [CGRect] = [] {
+        didSet {   // keep one time range (or nil = whole video) per blur box
+            if blurTimes.count > blurs.count { blurTimes = Array(blurTimes.prefix(blurs.count)) }
+            while blurTimes.count < blurs.count { blurTimes.append(nil) }
+        }
+    }
+    /// When each blur is shown, in the original video's time. nil = the whole video.
+    @Published var blurTimes: [ClosedRange<Double>?] = []
     /// 1 = normal; 1.5 = one and a half times as fast (voices keep their normal pitch).
     @Published var speed: Double = 1
     /// Anything that needs the picture rebuilt besides a crop.
     var hasEffects: Bool { !blurs.isEmpty || abs(speed - 1) > 0.001 }
     func addBlur() { blurs.append(CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2)) }
+    /// A blur shown only from the playhead, for about 5 seconds (drag its bar on the timeline to change).
+    func addTimedBlur() {
+        blurs.append(CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2))
+        let a = min(time, max(0, duration - 1)), b = min(duration, a + 5)
+        blurTimes[blurs.count - 1] = a...max(a + 0.5, b)
+    }
+    func removeBlur(at i: Int) {
+        guard i < blurs.count else { return }
+        blurTimes.remove(at: i)
+        blurs.remove(at: i)
+    }
+    /// Is blur i showing at time t?
+    func blurActive(_ i: Int, at t: Double) -> Bool {
+        guard i < blurTimes.count, let r = blurTimes[i] else { return true }
+        return r.contains(t)
+    }
+    var hasTimedBlurs: Bool { blurTimes.contains { $0 != nil } }
 
     // Frame tab: the box becomes a shaped window (rounded box or circle) with an optional border.
     enum FrameShape: String, CaseIterable, Identifiable { case rounded = "Rounded box", circle = "Circle"; var id: String { rawValue } }
@@ -108,6 +138,7 @@ final class CropModel: ObservableObject {
     func setStart() { trimStart = min(time, max(0, trimEnd - 0.5)) }
     func setEnd() { trimEnd = max(time, min(duration, trimStart + 0.5)) }
     func clearTrim() { trimStart = 0; trimEnd = duration }
+    func resetTiming() { clearTrim(); cuts = [] }
 
     func pixels(_ n: CGRect) -> CGRect {
         func even(_ v: CGFloat) -> CGFloat { (v / 2).rounded(.down) * 2 }
@@ -235,12 +266,13 @@ final class CropModel: ObservableObject {
         generator = g
         self.url = url
         crop = CGRect(x: 0, y: 0, width: 1, height: 1)
-        blurs = []; speed = 1
+        blurs = []; speed = 1; cuts = []
         applyAspect()
         trimStart = 0
         trimEnd = duration
         time = min(duration * 0.1, 10)
         await refreshFrame()
+        makeFilmstrip(asset)
     }
 
     func refreshFrame() async {
@@ -479,7 +511,7 @@ final class CropModel: ObservableObject {
     private var suffix: String {
         let base: String
         switch (isCropped || hasEffects, isTrimmed) {
-        case _ where hasEffects: base = "edited"
+        case _ where hasEffects || nameSource != nil: base = "edited"
         case (true, true): base = "edited"
         case (false, true): base = "trimmed"
         case (true, false): base = "cropped"
@@ -489,12 +521,19 @@ final class CropModel: ObservableObject {
         return base.isEmpty ? "copy" : base
     }
 
-    private func outputURL(for src: URL, ext: String, gif: Bool = false) -> URL {
+    func outputURL(for src: URL, ext: String, gif: Bool = false) -> URL {
         var dir = src.deletingLastPathComponent()
         if !FileManager.default.isWritableFile(atPath: dir.path) {
             dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
         }
-        let base = src.deletingPathExtension().lastPathComponent + (gif ? " (GIF)" : " (\(suffix))")
+        let named = nameSource ?? src
+        if nameSource != nil {
+            dir = named.deletingLastPathComponent()
+            if !FileManager.default.isWritableFile(atPath: dir.path) {
+                dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+            }
+        }
+        let base = named.deletingPathExtension().lastPathComponent + (gif ? " (GIF)" : " (\(suffix))")
         return DownloadModel.uniqueURL(in: dir, name: base, ext: ext)
     }
 
@@ -1052,7 +1091,11 @@ struct CropView: View {
                 }
                 .frame(width: 170)
                 .disabled(model.url == nil || model.busy)
-                Button("Add Blur") { model.addBlur() }
+                Menu {
+                    Button("For the whole video") { model.addBlur() }
+                    Button("From the playhead, for 5 seconds") { model.addTimedBlur() }
+                } label: { Label("Add Blur", systemImage: "drop.halffull") }
+                    .fixedSize()
                     .disabled(model.url == nil || model.busy)
                     .help("Adds a box that blurs that part of the picture, e.g. a name, a face or a patient ID. Drag it into place; × removes it.")
                 Button("Reset") { model.reset() }.disabled(model.url == nil || model.busy)
@@ -1087,14 +1130,9 @@ struct CropView: View {
             }
 
             if model.url != nil {
-                HStack(spacing: 10) {
-                    Text(timeString(model.time)).monospacedDigit().foregroundStyle(.secondary)
-                    Slider(value: $model.time, in: 0...max(model.duration, 0.1))
-                        .onChange(of: model.time) { _ in Task { await model.refreshFrame() } }
-                    Text(timeString(model.duration)).monospacedDigit().foregroundStyle(.secondary)
-                }
-                TrimBar(start: model.trimStart, end: model.trimEnd, duration: model.duration, playhead: model.time)
-                    .frame(height: 8)
+                ClipTimeline(model: model)
+                    .disabled(model.busy)
+                TimingBar(model: model)
                 HStack(spacing: 10) {
                     Picker("Speed", selection: $model.speed) {
                         Text("1×").tag(1.0); Text("1.25×").tag(1.25); Text("1.5×").tag(1.5)
@@ -1103,19 +1141,10 @@ struct CropView: View {
                     .frame(width: 130)
                     .disabled(model.busy)
                     .help("Saves the video faster, with voices kept at their normal pitch.")
-                    Button("Set Start") { model.setStart() }.disabled(model.busy)
-                    Button("Set End") { model.setEnd() }.disabled(model.busy)
-                    if model.isTrimmed {
-                        Button("Clear Trim") { model.clearTrim() }.disabled(model.busy)
-                        Text("Keep \(timeString(model.trimStart)) – \(timeString(model.trimEnd))  (\(timeString(model.trimEnd - model.trimStart)))")
-                            .monospacedDigit().foregroundStyle(.secondary)
-                    } else {
-                        Text("To trim: move the slider, then Set Start / Set End.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    Spacer()
                 }
                 if !model.blurs.isEmpty {
-                    Text("Blur boxes stay in the same spot for the whole video; they don't follow a face that moves.")
+                    Text("Each blur has a purple bar under the timeline: drag its ends to choose when it shows, or right-click it for whole video. Blur boxes stay in one spot; they don't follow a face that moves.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Divider()
@@ -1187,8 +1216,8 @@ struct CropView: View {
                         }
                         Button("Cancel") { model.cancel() }
                     } else if mode == .frame {
-                        Button("Make GIF") { model.makeFramed(gif: true, gifWidth: 480, gifFPS: 15) }
-                        Button("Save Video") { model.makeFramed(gif: false, gifWidth: nil, gifFPS: 15) }
+                        Button("Make GIF") { model.withFirstPass(finalIfPlain: false) { model.makeFramed(gif: true, gifWidth: 480, gifFPS: 15) } }
+                        Button("Save Video") { model.withFirstPass(finalIfPlain: false) { model.makeFramed(gif: false, gifWidth: nil, gifFPS: 15) } }
                             .keyboardShortcut(.defaultAction)
                     } else if mode == .gif {
                         Picker("Size", selection: $gifWidth) {
@@ -1200,20 +1229,20 @@ struct CropView: View {
                             Text("10 fps").tag(10); Text("15 fps").tag(15); Text("20 fps").tag(20)
                         }
                         .frame(width: 190)
-                        Button("Make GIF") { model.makeGIF(width: gifWidth == 0 ? nil : gifWidth, fps: gifFPS) }
+                        Button("Make GIF") { model.withFirstPass(finalIfPlain: false) { model.makeGIF(width: gifWidth == 0 ? nil : gifWidth, fps: gifFPS) } }
                             .keyboardShortcut(.defaultAction)
                     } else if mode == .compress {
-                        Button("Save Smaller File") { model.save(.fast, compress: true) }
+                        Button("Save Smaller File") { model.withFirstPass(finalIfPlain: false) { model.save(.fast, compress: true) } }
                             .keyboardShortcut(.defaultAction)
                             .alert("This video can't be made any smaller", isPresented: $model.offerPlainSave) {
-                                Button("Save Without Compressing") { model.save(.fast) }
+                                Button("Save Without Compressing") { model.withFirstPass(finalIfPlain: true) { model.save(.fast) } }
                                 Button("Cancel", role: .cancel) {}
                             } message: {
                                 Text("It's already compressed about as far as it can go without visible loss. Save your crop and trim anyway, without compressing?")
                             }
                             .help("Saves your edits as the smallest file that still looks the same (HEVC).")
                     } else {
-                        Button("Save Video") { model.save(.fast) }
+                        Button("Save Video") { model.withFirstPass(finalIfPlain: true) { model.save(.fast) } }
                             .keyboardShortcut(.defaultAction)
                             .help("Rebuilds the video with your Mac's video hardware: the cropped area is permanently removed and trims are exact.")
                     }
@@ -1237,6 +1266,7 @@ struct CropView: View {
             openPending()
         }
         .onChange(of: mode) { _, m in model.frameMode = m == .frame }
+        .onChange(of: model.time) { _, _ in Task { await model.refreshFrame() } }
         .onChange(of: nav.pendingEdit) { _, _ in openPending() }
     }
 
@@ -1251,11 +1281,15 @@ struct CropView: View {
     private var summary: String {
         var parts: [String] = []
         if model.isTrimmed { parts.append("Trim \(timeString(model.trimStart))–\(timeString(model.trimEnd))") }
+        if model.hasCuts { parts.append(model.cutSummary + " and joined") }
         if model.isCropped && mode != .frame {
             let r = model.pixelRect
             parts.append("Crop \(Int(r.width))×\(Int(r.height))")
         }
-        if !model.blurs.isEmpty { parts.append("\(model.blurs.count) blur area\(model.blurs.count == 1 ? "" : "s")") }
+        if !model.blurs.isEmpty {
+            let timed = model.blurTimes.compactMap { $0 }.count
+            parts.append("\(model.blurs.count) blur area\(model.blurs.count == 1 ? "" : "s")" + (timed > 0 ? " (\(timed) for part of the time)" : ""))
+        }
         if abs(model.speed - 1) > 0.001 { parts.append(String(format: "%g× speed", model.speed)) }
         switch mode {
         case .edit: break
@@ -1310,6 +1344,7 @@ struct CropCanvas: View {
                     .mask(alignment: .topLeading) {
                         Rectangle().frame(width: bb.width, height: bb.height).offset(x: bb.minX, y: bb.minY)
                     }
+                    .opacity(model.blurActive(i, at: model.time) ? 1 : 0.12)
                     .allowsHitTesting(false)
                 }
 
@@ -1402,7 +1437,7 @@ struct CropCanvas: View {
                                 .onEnded { _ in dragStart = nil })
                             .disabled(model.busy)
                     }
-                    Button { if i < model.blurs.count { model.blurs.remove(at: i) } } label: {
+                    Button { model.removeBlur(at: i) } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 16))
                             .foregroundStyle(.white, .orange)
                     }
