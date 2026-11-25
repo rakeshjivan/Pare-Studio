@@ -155,7 +155,7 @@ struct StudioRoot: View {
             if nav.screen != .home { Divider() }
             Group {
                 switch nav.screen {
-                case .home: HomeView()
+                case .home: StudioHomeView()
                 case .download: ReelsHome()
                 case .guide: RootView()
                 case .videoSlides: VideoSlidesView()
@@ -207,7 +207,7 @@ struct ClaudeChip: View {
 
 // MARK: - Home
 
-struct HomeView: View {
+struct StudioHomeView: View {
     private let tools: [Screen] = [.download, .guide, .videoSlides, .fitSlides, .transcribe]
     private let columns = [GridItem(.adaptive(minimum: 300, maximum: 420), spacing: 18)]
 
