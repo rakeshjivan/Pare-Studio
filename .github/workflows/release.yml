@@ -1,0 +1,61 @@
+name: Build Pare Studio
+
+on:
+  push:
+    branches: [main]    # every change to main builds and publishes a release
+  workflow_dispatch:    # or click "Run workflow" on the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load signing certificate
+        id: sign
+        continue-on-error: true   # falls back to ad-hoc signing
+        env:
+          SIGNING_P12: ${{ secrets.SIGNING_P12 }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_P12" ]; then echo "No certificate: signing ad hoc."; exit 0; fi
+          KC="$RUNNER_TEMP/sign.keychain-db"
+          echo "$SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings "$KC"
+          security unlock-keychain -p ci "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$SIGNING_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ci "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          security find-certificate -c "Pare Guide Signing" -p "$KC" > "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+          security find-identity -p codesigning "$KC"
+          echo "identity=Pare Guide Signing" >> "$GITHUB_OUTPUT"
+          echo "keychain=$KC" >> "$GITHUB_OUTPUT"
+
+      - name: Build universal app
+        env:
+          SIGN_IDENTITY: ${{ steps.sign.outputs.identity }}
+          SIGN_KEYCHAIN: ${{ steps.sign.outputs.keychain }}
+        run: UNIVERSAL=1 BUILD_NUMBER=${{ github.run_number }} bash build.sh
+
+      - name: Zip
+        run: ditto -c -k --keepParent "Pare Studio.app" Pare-Studio-mac.zip
+
+      - name: Keep build as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pare-Studio-mac
+          path: Pare-Studio-mac.zip
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Pare Studio (build ${{ github.run_number }})
+          files: Pare-Studio-mac.zip
+          make_latest: true
+          generate_release_notes: true

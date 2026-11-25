@@ -1,0 +1,22 @@
+name: Check build (branches)
+
+# Compiles every branch except main, without publishing a release,
+# so changes can be checked before they reach anyone's installed app.
+on:
+  push:
+    branches-ignore: [main]
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile
+        run: CI=1 bash build.sh
+      - name: Zip
+        run: ditto -c -k --keepParent "Pare Studio.app" Pare-Studio-test.zip
+      - name: Keep test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pare-Studio-test
+          path: Pare-Studio-test.zip
