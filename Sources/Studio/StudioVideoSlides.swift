@@ -221,11 +221,11 @@ final class VideoSlides: ObservableObject {
         problem = nil
         message = nil
         player.pause()
+        let crop = self.crop, work = self.work, duration = self.duration
         let opts = SlideFinder.Options(step: sampling.rawValue, threshold: sensitivity.threshold, everyFrame: detection == .every,
                                        settle: settle.rawValue, keepFirstOnly: keepFirstOnly, keepCompletedBuild: keepCompletedBuild,
                                        from: Double(startAt.trimmed).map { max(0, $0) } ?? 0,
                                        to: Double(stopAt.trimmed).map { min(duration, $0) } ?? duration)
-        let crop = self.crop, work = self.work, duration = self.duration
         // The sound (and, if asked, the transcript) are worked out at the same time.
         startAudio()
         task = Task {
