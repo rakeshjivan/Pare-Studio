@@ -94,118 +94,6 @@ extension CropModel {
         }
     }
 
-    /// Needs a first pass on the original video: parts cut out, or blurs for part of the time.
-    var needsFirstPass: Bool { hasCuts || hasTimedBlurs }
-
-    /// Runs a save. With cuts or timed blurs, a first pass on the original video joins the kept parts
-    /// and burns in the timed blurs (at the original times); the save then runs on that copy
-    /// (named after the original), and the editor is put back afterwards.
-    /// `finalIfPlain`: for a plain video save with nothing else to change, the first pass is the result.
-    func withFirstPass(finalIfPlain: Bool, _ save: @escaping () -> Void) {
-        guard needsFirstPass, let src = url, !busy else { save(); return }
-        guard let ff = ReelTools.find("ffmpeg") else {
-            status = "ffmpeg isn't installed yet. Open the Download tab once so Pare Studio can fetch it."
-            return
-        }
-        let keeps = keepSegments
-        guard !keeps.isEmpty else { status = "Everything is cut out. Remove a cut or move its edges."; return }
-        let timed: [(rect: CGRect, range: ClosedRange<Double>)] = blurs.indices.compactMap { i in
-            i < blurTimes.count ? blurTimes[i].map { (blurs[i], $0) } : nil
-        }
-        let wholeBlurs = blurs.indices.filter { i in i >= blurTimes.count || blurTimes[i] == nil }.map { blurs[$0] }
-        let plain = finalIfPlain && !isCropped && wholeBlurs.isEmpty && abs(speed - 1) < 0.001
-        busy = true
-        savedFile = nil
-        progress = nil
-        status = hasCuts ? "Joining the parts you're keeping…" : "Adding the timed blurs…"
-        let started = Date()
-        let size = videoSize
-        Task {
-            let hasAudio = (try? await AVURLAsset(url: src).loadTracks(withMediaType: .audio).isEmpty == false) ?? false
-            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("PareStudioPass-\(UUID().uuidString.prefix(6))")
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let pass = dir.appendingPathComponent(src.deletingPathExtension().lastPathComponent + ".mp4")
-            // 1. Timed blurs, on the original timeline.
-            var f = "[0:v]null[v0src]"
-            var cur = "v0src"
-            for (k, tb) in timed.enumerated() {
-                func even(_ v: CGFloat) -> Int { Int((v / 2).rounded(.down) * 2) }
-                let w = max(16, even(tb.rect.width * size.width)), h = max(16, even(tb.rect.height * size.height))
-                let x = even(tb.rect.minX * size.width), y = even(tb.rect.minY * size.height)
-                let r = max(1, min(min(w, h) / 2 - 1, 40)), rc = max(1, min(r, min(w, h) / 4 - 1))
-                f += ";[\(cur)]split[tm\(k)][ts\(k)];[ts\(k)]crop=\(w):\(h):\(x):\(y),boxblur=luma_radius=\(r):luma_power=3:chroma_radius=\(rc):chroma_power=3[tb\(k)];"
-                f += String(format: "[tm%d][tb%d]overlay=%d:%d:enable='between(t,%.3f,%.3f)'[tv%d]", k, k, x, y, tb.range.lowerBound, tb.range.upperBound, k)
-                cur = "tv\(k)"
-            }
-            // 2. The kept parts, joined.
-            let n = keeps.count
-            f += ";[\(cur)]split=\(n)" + (0..<n).map { "[vs\($0)]" }.joined()
-            if hasAudio { f += ";[0:a]asplit=\(n)" + (0..<n).map { "[as\($0)]" }.joined() }
-            for (i, k) in keeps.enumerated() {
-                f += String(format: ";[vs%d]trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS[v%d]", i, k.start, k.end, i)
-                if hasAudio { f += String(format: ";[as%d]atrim=start=%.3f:end=%.3f,asetpts=PTS-STARTPTS[a%d]", i, k.start, k.end, i) }
-            }
-            f += ";" + keeps.indices.map { hasAudio ? "[v\($0)][a\($0)]" : "[v\($0)]" }.joined()
-            f += "concat=n=\(n):v=1:a=\(hasAudio ? 1 : 0)[v]" + (hasAudio ? "[a]" : "")
-            var base = ["-y", "-loglevel", "error", "-i", src.path, "-filter_complex", f, "-map", "[v]"]
-            if hasAudio { base += ["-map", "[a]", "-c:a", "aac", "-b:a", "192k"] }
-            let tail = ["-movflags", "+faststart", pass.path]
-            // Mac video hardware first; the software encoder if that fails.
-            var (code, _) = await ReelTools.capture(ff.path, base + ["-c:v", "h264_videotoolbox", "-q:v", "70"] + tail)
-            if code != 0 {
-                (code, _) = await ReelTools.capture(ff.path, base + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"] + tail)
-            }
-            guard code == 0, FileManager.default.fileExists(atPath: pass.path) else {
-                busy = false
-                status = "Couldn't prepare the video. See details in the Download tab's Log."
-                try? FileManager.default.removeItem(at: dir)
-                return
-            }
-            if plain {
-                // Nothing else to change: the first pass is the finished video.
-                nameSource = src
-                let out = outputURL(for: src, ext: "mp4")
-                nameSource = nil
-                do {
-                    try FileManager.default.moveItem(at: pass, to: out)
-                    savedFile = out
-                    let mb = Double((try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)?.int64Value ?? 0) / 1_048_576
-                    status = "Saved “\(out.lastPathComponent)” in \(Self.duration(Date().timeIntervalSince(started))) · \(String(format: "%.0f", mb)) MB."
-                } catch {
-                    status = "Couldn't save: \(error.localizedDescription)"
-                }
-                busy = false
-                try? FileManager.default.removeItem(at: dir)
-                return
-            }
-            // Run the chosen save on the prepared copy, then put the editor back as it was.
-            let kept = (url: url, start: trimStart, end: trimEnd, duration: duration, cuts: cuts, time: time,
-                        blurs: blurs, blurTimes: blurTimes)
-            let length = keeps.reduce(0) { $0 + ($1.end - $1.start) }
-            busy = false
-            url = pass
-            nameSource = src
-            duration = length
-            trimStart = 0
-            trimEnd = length
-            cuts = []
-            blurs = wholeBlurs           // timed blurs are already in the copy
-            blurTimes = wholeBlurs.map { _ in nil }
-            save()
-            while busy { try? await Task.sleep(nanoseconds: 250_000_000) }
-            url = kept.url
-            nameSource = nil
-            duration = kept.duration
-            trimStart = kept.start
-            trimEnd = kept.end
-            cuts = kept.cuts
-            blurs = kept.blurs
-            blurTimes = kept.blurTimes
-            time = kept.time
-            try? FileManager.default.removeItem(at: dir)
-        }
-    }
-
     var cutSummary: String {
         let n = activeCuts.count
         return n == 0 ? "" : "\(n) part\(n == 1 ? "" : "s") cut out"
@@ -215,117 +103,210 @@ extension CropModel {
 // MARK: - Timeline
 
 /// A Camtasia-style timeline: a time ruler, the film strip with yellow trim handles and red parts cut out,
-/// a lane for blurs (each bar is when that blur shows), and a playhead you can grab and drag.
+/// the sound's waveform, lanes for blurs, text and logos (each bar is when it shows), splits, the selection,
+/// and a playhead you can grab and drag. Zoom with the slider above.
 struct ClipTimeline: View {
     @ObservedObject var model: CropModel
     @State private var cutDrag: (id: UUID, start: Double, end: Double)?
     @State private var trimDrag: (start: Double, end: Double)?
-    @State private var blurDrag: (index: Int, start: Double, end: Double)?
+    @State private var barDrag: (key: String, start: Double, end: Double)?
     @State private var hoverX: CGFloat?
 
     private let ruler: CGFloat = 18
-    private let strip: CGFloat = 56
+    private let strip: CGFloat = 52
+    private let wave: CGFloat = 26
     private let laneH: CGFloat = 18
 
-    private var lanes: CGFloat { model.blurs.isEmpty ? 0 : CGFloat(model.blurs.count) * (laneH + 3) + 4 }
+    private struct Bar: Identifiable {
+        let id: String
+        let label: String
+        let colour: Color
+        let icon: String
+        let range: ClosedRange<Double>?
+        let set: (ClosedRange<Double>?) -> Void
+        let delete: () -> Void
+        let select: () -> Void
+    }
+
+    private var bars: [Bar] {
+        var out: [Bar] = []
+        for i in model.blurs.indices {
+            out.append(Bar(id: "b\(i)", label: "Blur \(i + 1)", colour: .purple, icon: "drop.halffull",
+                           range: i < model.blurTimes.count ? model.blurTimes[i] : nil,
+                           set: { r in if i < model.blurTimes.count { model.blurTimes[i] = r } },
+                           delete: { model.removeBlur(at: i) }, select: {}))
+        }
+        for t in model.texts {
+            let id = t.id
+            out.append(Bar(id: "t\(id)", label: t.text.isEmpty ? "Text" : t.text, colour: .teal, icon: "textformat", range: t.range,
+                           set: { r in if let k = model.texts.firstIndex(where: { $0.id == id }) { model.texts[k].range = r } },
+                           delete: { model.removeOverlay(id) }, select: { model.selectedOverlay = id }))
+        }
+        for o in model.images {
+            let id = o.id
+            out.append(Bar(id: "i\(id)", label: o.url.deletingPathExtension().lastPathComponent, colour: .orange, icon: "photo", range: o.range,
+                           set: { r in if let k = model.images.firstIndex(where: { $0.id == id }) { model.images[k].range = r } },
+                           delete: { model.removeOverlay(id) }, select: { model.selectedOverlay = id }))
+        }
+        return out
+    }
 
     var body: some View {
-        GeometryReader { g in
-            let w = g.size.width
-            let d = max(model.duration, 0.001)
-            let x = { (t: Double) -> CGFloat in CGFloat(t / d) * w }
-            let t = { (px: CGFloat) -> Double in min(max(0, Double(px / w) * d), d) }
-            ZStack(alignment: .topLeading) {
-                // Ruler: click or drag to scrub.
-                Ruler(duration: d, width: w)
-                    .frame(width: w, height: ruler)
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { v in model.time = t(v.location.x) })
-
-                Group {
-                    // Film strip: click or drag to scrub.
-                    HStack(spacing: 0) {
-                        ForEach(model.filmstrip.indices, id: \.self) { i in
-                            Group {
-                                if let img = model.filmstrip[i] {
-                                    Image(decorative: img, scale: 1).resizable().aspectRatio(contentMode: .fill)
-                                } else {
-                                    Rectangle().fill(Color.secondary.opacity(0.25))
-                                }
-                            }
-                            .frame(width: w / CGFloat(max(1, model.filmstrip.count)), height: strip)
-                            .clipped()
-                        }
-                    }
-                    .frame(width: w, height: strip)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { v in model.time = t(v.location.x) })
-                    .onContinuousHover { phase in
-                        if case .active(let p) = phase { hoverX = p.x } else { hoverX = nil }
-                    }
-
-                    // Trimmed-off ends.
-                    Rectangle().fill(Color.black.opacity(0.65))
-                        .frame(width: max(0, x(model.trimStart)), height: strip)
-                        .allowsHitTesting(false)
-                    Rectangle().fill(Color.black.opacity(0.65))
-                        .frame(width: max(0, w - x(model.trimEnd)), height: strip)
-                        .offset(x: x(model.trimEnd))
-                        .allowsHitTesting(false)
-
-                    // Parts cut out of the middle.
-                    ForEach(model.cuts) { c in cutView(c, x: x, w: w, d: d) }
-
-                    // The kept part and its trim handles.
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(Color.yellow, lineWidth: 3)
-                        .frame(width: max(8, x(model.trimEnd) - x(model.trimStart)), height: strip)
-                        .offset(x: x(model.trimStart))
-                        .allowsHitTesting(false)
-                    trimHandle(at: x(model.trimStart), leading: true)
-                        .gesture(DragGesture().onChanged { v in
-                            let s = trimDrag ?? (model.trimStart, model.trimEnd)
-                            trimDrag = s
-                            model.trimStart = min(max(0, s.start + Double(v.translation.width / w) * d), model.trimEnd - 0.5)
-                            model.time = model.trimStart
-                        }.onEnded { _ in trimDrag = nil })
-                        .help("Drag to choose where the video starts")
-                    trimHandle(at: x(model.trimEnd), leading: false)
-                        .gesture(DragGesture().onChanged { v in
-                            let s = trimDrag ?? (model.trimStart, model.trimEnd)
-                            trimDrag = s
-                            model.trimEnd = max(min(d, s.end + Double(v.translation.width / w) * d), model.trimStart + 0.5)
-                            model.time = model.trimEnd
-                        }.onEnded { _ in trimDrag = nil })
-                        .help("Drag to choose where the video ends")
-
-                    // Hover time.
-                    if let hx = hoverX {
-                        Text(TimingBar.fmt(t(hx)))
-                            .font(.caption2.monospacedDigit()).padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(Capsule().fill(.black.opacity(0.7))).foregroundStyle(.white)
-                            .offset(x: min(max(0, hx - 18), w - 40), y: strip - 16)
-                            .allowsHitTesting(false)
-                    }
+        let lanes = bars
+        let total = ruler + strip + (model.waveform.isEmpty ? 0 : wave + 2) + (lanes.isEmpty ? 0 : CGFloat(lanes.count) * (laneH + 3) + 4) + 4
+        GeometryReader { outer in
+            let w = max(outer.size.width, outer.size.width * CGFloat(model.zoom))
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: model.zoom > 1.01) {
+                    content(w: w, lanes: lanes, total: total)
+                        .frame(width: w, height: total, alignment: .topLeading)
                 }
-                .offset(y: ruler)
-
-                // Blur lane: one bar per blur, showing when it's on.
-                ForEach(model.blurs.indices, id: \.self) { i in
-                    blurBar(i, x: x, w: w, d: d)
-                        .offset(y: ruler + strip + 6 + CGFloat(i) * (laneH + 3))
+                .onChange(of: model.time) { _, t in
+                    guard model.zoom > 1.01, model.playing else { return }
+                    proxy.scrollTo("playhead-\(Int(t))", anchor: .center)
                 }
-
-                // Playhead, with a knob to grab.
-                Playhead(height: ruler + strip + lanes + 4)
-                    .offset(x: x(min(model.time, d)) - 7)
-                    .gesture(DragGesture().onChanged { v in model.time = t(x(model.time) + v.translation.width) })
             }
-            .frame(width: w, height: ruler + strip + lanes + 4, alignment: .topLeading)
         }
-        .frame(height: ruler + strip + lanes + 4)
-        .padding(.top, 2)
+        .frame(height: total)
+    }
+
+    @ViewBuilder
+    private func content(w: CGFloat, lanes: [Bar], total: CGFloat) -> some View {
+        let d = max(model.duration, 0.001)
+        let x = { (t: Double) -> CGFloat in CGFloat(t / d) * w }
+        let t = { (px: CGFloat) -> Double in min(max(0, Double(px / w) * d), d) }
+        let waveTop = ruler + strip + 2
+        let lanesTop = waveTop + (model.waveform.isEmpty ? 0 : wave + 2) + 4
+        ZStack(alignment: .topLeading) {
+            // Scroll anchors so the view can follow the playhead while playing.
+            ForEach(0..<max(1, Int(d) + 1), id: \.self) { s in
+                Color.clear.frame(width: 1, height: 1).offset(x: x(Double(s))).id("playhead-\(s)")
+            }
+            Ruler(duration: d, width: w)
+                .frame(width: w, height: ruler)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { v in model.pause(); model.time = t(v.location.x) })
+
+            Group {
+                // Film strip: click to move the playhead (and select the part between splits); drag to scrub.
+                HStack(spacing: 0) {
+                    ForEach(model.filmstrip.indices, id: \.self) { i in
+                        Group {
+                            if let img = model.filmstrip[i] {
+                                Image(decorative: img, scale: 1).resizable().aspectRatio(contentMode: .fill)
+                            } else {
+                                Rectangle().fill(Color.secondary.opacity(0.25))
+                            }
+                        }
+                        .frame(width: w / CGFloat(max(1, model.filmstrip.count)), height: strip)
+                        .clipped()
+                    }
+                }
+                .frame(width: w, height: strip)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { v in model.pause(); model.time = t(v.location.x) }
+                    .onEnded { v in
+                        if abs(v.translation.width) < 3 {
+                            if model.splits.isEmpty { model.clearSelection() } else { model.selectSegment(at: t(v.location.x)) }
+                        }
+                    })
+                .onContinuousHover { phase in
+                    if case .active(let p) = phase { hoverX = p.x } else { hoverX = nil }
+                }
+
+                // Trimmed-off ends.
+                Rectangle().fill(Color.black.opacity(0.65))
+                    .frame(width: max(0, x(model.trimStart)), height: strip)
+                    .allowsHitTesting(false)
+                Rectangle().fill(Color.black.opacity(0.65))
+                    .frame(width: max(0, w - x(model.trimEnd)), height: strip)
+                    .offset(x: x(model.trimEnd))
+                    .allowsHitTesting(false)
+
+                // Selection.
+                if let a = model.markIn, let b = model.markOut, b > a {
+                    Rectangle().fill(Color.accentColor.opacity(0.32))
+                        .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 2))
+                        .frame(width: max(2, x(b) - x(a)), height: strip)
+                        .offset(x: x(a))
+                        .allowsHitTesting(false)
+                } else if let a = model.markIn ?? model.markOut {
+                    Rectangle().fill(Color.accentColor).frame(width: 2, height: strip).offset(x: x(a) - 1).allowsHitTesting(false)
+                }
+
+                // Splits.
+                ForEach(model.splits, id: \.self) { s in
+                    Rectangle().fill(Color.white).frame(width: 2, height: strip)
+                        .overlay(alignment: .top) {
+                            Image(systemName: "scissors").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                                .padding(2).background(Circle().fill(Color.black.opacity(0.7))).offset(y: -2)
+                        }
+                        .offset(x: x(s) - 1)
+                        .contextMenu { Button("Remove this split") { model.splits.removeAll { $0 == s } } }
+                }
+
+                // Parts cut out of the middle.
+                ForEach(model.cuts) { c in cutView(c, x: x, w: w, d: d) }
+
+                // The kept part and its trim handles.
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.yellow, lineWidth: 3)
+                    .frame(width: max(8, x(model.trimEnd) - x(model.trimStart)), height: strip)
+                    .offset(x: x(model.trimStart))
+                    .allowsHitTesting(false)
+                trimHandle(at: x(model.trimStart), leading: true)
+                    .gesture(DragGesture().onChanged { v in
+                        let s = trimDrag ?? (model.trimStart, model.trimEnd)
+                        trimDrag = s
+                        model.pause()
+                        model.trimStart = min(max(0, s.start + Double(v.translation.width / w) * d), model.trimEnd - 0.5)
+                        model.time = model.trimStart
+                    }.onEnded { _ in trimDrag = nil })
+                    .help("Drag to choose where the video starts")
+                trimHandle(at: x(model.trimEnd), leading: false)
+                    .gesture(DragGesture().onChanged { v in
+                        let s = trimDrag ?? (model.trimStart, model.trimEnd)
+                        trimDrag = s
+                        model.pause()
+                        model.trimEnd = max(min(d, s.end + Double(v.translation.width / w) * d), model.trimStart + 0.5)
+                        model.time = model.trimEnd
+                    }.onEnded { _ in trimDrag = nil })
+                    .help("Drag to choose where the video ends")
+
+                if let hx = hoverX {
+                    Text(TimingBar.fmt(t(hx)))
+                        .font(.caption2.monospacedDigit()).padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Capsule().fill(.black.opacity(0.7))).foregroundStyle(.white)
+                        .offset(x: min(max(0, hx - 18), w - 40), y: strip - 16)
+                        .allowsHitTesting(false)
+                }
+            }
+            .offset(y: ruler)
+
+            // Waveform.
+            if !model.waveform.isEmpty {
+                Waveform(peaks: model.waveform, muted: model.audioFX.mute)
+                    .frame(width: w, height: wave)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.08)))
+                    .offset(y: waveTop)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { v in model.pause(); model.time = t(v.location.x) })
+                    .help("The sound. Quiet gaps are easy to spot and cut out.")
+            }
+
+            // Lanes: blurs, text, logos.
+            ForEach(Array(lanes.enumerated()), id: \.element.id) { k, bar in
+                laneBar(bar, x: x, w: w, d: d)
+                    .offset(y: lanesTop + CGFloat(k) * (laneH + 3))
+            }
+
+            // Playhead, with a knob to grab.
+            Playhead(height: total - 2)
+                .offset(x: x(min(model.time, d)) - 7)
+                .gesture(DragGesture().onChanged { v in model.pause(); model.time = t(x(model.time) + v.translation.width) })
+        }
     }
 
     private func trimHandle(at px: CGFloat, leading: Bool) -> some View {
@@ -367,6 +348,7 @@ struct ClipTimeline: View {
             .gesture(DragGesture().onChanged { v in
                 let s = (cutDrag?.id == c.id ? cutDrag : nil) ?? (c.id, c.start, c.end)
                 cutDrag = s
+                model.pause()
                 let dt = Double(v.translation.width / w) * d
                 if start { model.setCut(c.id, start: s.start + dt); model.time = max(0, s.start + dt) }
                 else { model.setCut(c.id, end: s.end + dt); model.time = min(d, s.end + dt) }
@@ -374,70 +356,81 @@ struct ClipTimeline: View {
             .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
     }
 
-    /// A blur's bar: drag the middle to move it in time, the ends to change when it starts and stops.
+    /// A blur, text or logo bar: drag the middle to move it in time, the ends to change when it starts and stops.
     @ViewBuilder
-    private func blurBar(_ i: Int, x: (Double) -> CGFloat, w: CGFloat, d: Double) -> some View {
-        let range = i < model.blurTimes.count ? model.blurTimes[i] : nil
-        let a = range?.lowerBound ?? 0, b = range?.upperBound ?? d
-        let colour = Color.purple
+    private func laneBar(_ bar: Bar, x: (Double) -> CGFloat, w: CGFloat, d: Double) -> some View {
+        let a = bar.range?.lowerBound ?? 0, b = bar.range?.upperBound ?? d
         HStack(spacing: 4) {
-            Image(systemName: "drop.halffull").font(.system(size: 10))
-            Text(range == nil ? "Blur \(i + 1) · whole video" : "Blur \(i + 1) · \(TimingBar.fmt(a))–\(TimingBar.fmt(b))")
+            Image(systemName: bar.icon).font(.system(size: 10))
+            Text(bar.range == nil ? "\(bar.label) · whole video" : "\(bar.label) · \(TimingBar.fmt(a))–\(TimingBar.fmt(b))")
                 .font(.caption2.weight(.semibold)).lineLimit(1)
             Spacer(minLength: 0)
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 8)
         .frame(width: max(24, x(b) - x(a)), height: laneH)
-        .background(RoundedRectangle(cornerRadius: 4).fill(colour.opacity(range == nil ? 0.45 : 0.85)))
-        .overlay(alignment: .leading) { blurEdge(i, start: true, w: w, d: d) }
-        .overlay(alignment: .trailing) { blurEdge(i, start: false, w: w, d: d) }
+        .background(RoundedRectangle(cornerRadius: 4).fill(bar.colour.opacity(bar.range == nil ? 0.5 : 0.9)))
+        .overlay(alignment: .leading) { barEdge(bar, start: true, w: w, d: d) }
+        .overlay(alignment: .trailing) { barEdge(bar, start: false, w: w, d: d) }
         .offset(x: x(a))
+        .onTapGesture { bar.select() }
         .gesture(DragGesture(minimumDistance: 2).onChanged { v in
-            let s = (blurDrag?.index == i ? blurDrag : nil) ?? (i, a, b)
-            blurDrag = s
+            let s = (barDrag?.key == bar.id ? barDrag : nil) ?? (bar.id, a, b)
+            barDrag = s
+            model.pause()
             let len = s.end - s.start
-            var na = s.start + Double(v.translation.width / w) * d
-            na = min(max(0, na), d - len)
-            setBlur(i, na...(na + len))
+            let na = min(max(0, s.start + Double(v.translation.width / w) * d), d - len)
+            set(bar, na...(na + len))
             model.time = na
-        }.onEnded { _ in blurDrag = nil })
+        }.onEnded { _ in barDrag = nil })
         .contextMenu {
-            Button("Show for the whole video") { setBlur(i, nil) }
-            Button("Show from the playhead for 5 seconds") {
-                let s = min(model.time, max(0, d - 1)); setBlur(i, s...min(d, s + 5))
-            }
+            Button("Show for the whole video") { bar.set(nil) }
+            Button("Show from the playhead for 5 seconds") { let s = min(model.time, max(0, d - 1)); set(bar, s...min(d, s + 5)) }
+            if model.hasSelection, let i = model.markIn, let o = model.markOut { Button("Show during the selection") { set(bar, i...o) } }
             Divider()
-            Button("Delete this blur", role: .destructive) { model.removeBlur(at: i) }
+            Button("Delete", role: .destructive) { bar.delete() }
         }
-        .help("When this blur shows. Drag the ends to change when it starts and stops; drag the middle to move it. Right-click for more.")
+        .help("When this shows. Drag the ends to change when it starts and stops; drag the middle to move it. Right-click for more.")
     }
 
-    private func blurEdge(_ i: Int, start: Bool, w: CGFloat, d: Double) -> some View {
+    private func barEdge(_ bar: Bar, start: Bool, w: CGFloat, d: Double) -> some View {
         Rectangle().fill(Color.white.opacity(0.85))
             .frame(width: 4, height: laneH - 4)
             .padding(.horizontal, 1)
             .contentShape(Rectangle().inset(by: -4))
             .gesture(DragGesture().onChanged { v in
-                let range = i < model.blurTimes.count ? model.blurTimes[i] : nil
-                let s = (blurDrag?.index == i ? blurDrag : nil) ?? (i, range?.lowerBound ?? 0, range?.upperBound ?? d)
-                blurDrag = s
+                let s = (barDrag?.key == bar.id ? barDrag : nil) ?? (bar.id, bar.range?.lowerBound ?? 0, bar.range?.upperBound ?? d)
+                barDrag = s
+                model.pause()
                 let dt = Double(v.translation.width / w) * d
-                if start {
-                    let na = min(max(0, s.start + dt), s.end - 0.3)
-                    setBlur(i, na...s.end); model.time = na
-                } else {
-                    let nb = max(min(d, s.end + dt), s.start + 0.3)
-                    setBlur(i, s.start...nb); model.time = nb
-                }
-            }.onEnded { _ in blurDrag = nil })
+                if start { let na = min(max(0, s.start + dt), s.end - 0.3); set(bar, na...s.end); model.time = na }
+                else { let nb = max(min(d, s.end + dt), s.start + 0.3); set(bar, s.start...nb); model.time = nb }
+            }.onEnded { _ in barDrag = nil })
             .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
     }
 
-    private func setBlur(_ i: Int, _ r: ClosedRange<Double>?) {
-        guard i < model.blurTimes.count else { return }
+    private func set(_ bar: Bar, _ r: ClosedRange<Double>?) {
         // A range covering the whole video is the same as "whole video".
-        if let r, r.lowerBound <= 0.05, r.upperBound >= model.duration - 0.05 { model.blurTimes[i] = nil } else { model.blurTimes[i] = r }
+        if let r, r.lowerBound <= 0.05, r.upperBound >= model.duration - 0.05 { bar.set(nil) } else { bar.set(r) }
+    }
+}
+
+/// The sound's loudness over time.
+struct Waveform: View {
+    let peaks: [Float]
+    var muted = false
+    var body: some View {
+        Canvas { ctx, size in
+            let n = peaks.count
+            guard n > 0 else { return }
+            let step = size.width / CGFloat(n)
+            var p = Path()
+            for (i, v) in peaks.enumerated() {
+                let h = max(1, CGFloat(v) * (size.height - 2))
+                p.addRect(CGRect(x: CGFloat(i) * step, y: (size.height - h) / 2, width: max(0.8, step * 0.8), height: h))
+            }
+            ctx.fill(p, with: .color(muted ? Color.secondary.opacity(0.3) : Color.green.opacity(0.75)))
+        }
     }
 }
 

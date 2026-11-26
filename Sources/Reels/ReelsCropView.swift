@@ -61,6 +61,42 @@ final class CropModel: ObservableObject {
     @Published var filmstrip: [CGImage?] = []
     /// While saving a joined copy: name the result after the original.
     var nameSource: URL?
+
+    // The full editor (see ReelsEditorPro.swift).
+    let player = AVPlayer()
+    var playerObserver: Any?
+    var playerAsset: AVURLAsset?
+    var fromPlayer = false
+    let effects = EffectBox()
+    var overlayArt: [UUID: (key: String, image: CGImage)] = [:]
+    var baseSize: CGSize = .zero
+    @Published var playing = false
+    @Published var shuttle: Double = 0
+    @Published var loop = false
+    @Published var zoom: Double = 1
+    @Published var markIn: Double?
+    @Published var markOut: Double?
+    @Published var splits: [Double] = []
+    @Published var waveform: [Float] = []
+    @Published var texts: [TextOverlay] = []
+    @Published var images: [ImageOverlay] = []
+    @Published var selectedOverlay: UUID?
+    @Published var look = Look()
+    @Published var rotation = 0
+    @Published var flipH = false
+    @Published var flipV = false
+    @Published var fadeIn: Double = 0
+    @Published var fadeOut: Double = 0
+    @Published var audioFX = AudioFX()
+    @Published var outputHeight = 0
+    @Published var typing = false
+    var undoStack: [EditState] = []
+    var redoStack: [EditState] = []
+    var lastState: EditState?
+    var lastPush = Date.distantPast
+    var applyingUndo = false
+    @Published var canUndo = false
+    @Published var canRedo = false
     @Published var crop = CGRect(x: 0, y: 0, width: 1, height: 1)   // 0...1 of the frame
     @Published var aspect: CropAspect = .free { didSet { applyAspect() } }
     @Published var codec = ""
@@ -95,7 +131,7 @@ final class CropModel: ObservableObject {
     /// 1 = normal; 1.5 = one and a half times as fast (voices keep their normal pitch).
     @Published var speed: Double = 1
     /// Anything that needs the picture rebuilt besides a crop.
-    var hasEffects: Bool { !blurs.isEmpty || abs(speed - 1) > 0.001 }
+    var hasEffects: Bool { !blurs.isEmpty || abs(speed - 1) > 0.001 || outputHeight > 0 }
     func addBlur() { blurs.append(CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2)) }
     /// A blur shown only from the playhead, for about 5 seconds (drag its bar on the timeline to change).
     func addTimedBlur() {
@@ -221,9 +257,13 @@ final class CropModel: ObservableObject {
     func open(_ url: URL) async {
         status = nil; savedFile = nil
         isGIF = false
+        pause()
+        resetEditorState()
         if url.pathExtension.lowercased() == "gif" {
             guard await openGIF(url) else { return }
             generator = nil
+            player.replaceCurrentItem(with: nil)
+            playerAsset = nil
             self.url = url
             crop = CGRect(x: 0, y: 0, width: 1, height: 1)
             blurs = []; speed = 1
@@ -273,6 +313,7 @@ final class CropModel: ObservableObject {
         time = min(duration * 0.1, 10)
         await refreshFrame()
         makeFilmstrip(asset)
+        setUpPlayer(asset)
     }
 
     func refreshFrame() async {
@@ -337,6 +378,18 @@ final class CropModel: ObservableObject {
     func reset() {
         crop = CGRect(x: 0, y: 0, width: 1, height: 1)
         blurs = []; speed = 1
+        applyAspect()
+    }
+
+    /// Back to the original video (can be undone).
+    func resetAll() {
+        pause()
+        crop = CGRect(x: 0, y: 0, width: 1, height: 1)
+        blurs = []; speed = 1; cuts = []; splits = []; texts = []; images = []
+        look = Look(); flipH = false; flipV = false; fadeIn = 0; fadeOut = 0; audioFX = AudioFX(); outputHeight = 0
+        trimStart = 0; trimEnd = duration
+        markIn = nil; markOut = nil
+        if rotation != 0 { rotation = 0; updateRotatedSize(); rebuildComposition() }
         applyAspect()
     }
 
@@ -770,6 +823,7 @@ final class CropModel: ObservableObject {
             parts.append("split[m\(i)][s\(i)];[s\(i)]crop=\(w):\(h):\(x):\(y),boxblur=luma_radius=\(r):luma_power=3:chroma_radius=\(rc):chroma_power=3[b\(i)];[m\(i)][b\(i)]overlay=\(x):\(y)")
         }
         if isCropped { parts.append(cropFilter(rect)) }
+        if outputHeight > 0 { parts.append("scale=-2:\(outputHeight):flags=lanczos") }
         return parts.isEmpty ? nil : parts.joined(separator: ",")
     }
 
@@ -1086,21 +1140,23 @@ struct CropView: View {
                     Text(u.lastPathComponent).lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Picker("Shape", selection: $model.aspect) {
-                    ForEach(CropAspect.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .frame(width: 170)
-                .disabled(model.url == nil || model.busy)
-                Menu {
-                    Button("For the whole video") { model.addBlur() }
-                    Button("From the playhead, for 5 seconds") { model.addTimedBlur() }
-                } label: { Label("Add Blur", systemImage: "drop.halffull") }
-                    .fixedSize()
+                Button { model.undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                    .keyboardShortcut("z", modifiers: [.command])
+                    .disabled(!model.canUndo || model.busy || model.typing)
+                Button { model.redo() } label: { Label("Redo", systemImage: "arrow.uturn.forward") }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .disabled(!model.canRedo || model.busy || model.typing)
+                Button { model.saveFrame() } label: { Label("Save Frame", systemImage: "camera") }
+                    .help("Saves the picture at the playhead (with your edits and crop) as an image")
+                    .disabled(model.url == nil || model.busy || model.isGIF)
+                Button("Reset All") { model.resetAll() }
+                    .help("Back to the original video. You can undo this.")
                     .disabled(model.url == nil || model.busy)
-                    .help("Adds a box that blurs that part of the picture, e.g. a name, a face or a patient ID. Drag it into place; × removes it.")
-                Button("Reset") { model.reset() }.disabled(model.url == nil || model.busy)
             }
+            .background(EditorKeys(model: model))
 
+            HStack(alignment: .top, spacing: 12) {
+            VStack(spacing: 8) {
             ZStack {
                 RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.85))
                 if let img = model.frame, model.videoSize.width > 0 {
@@ -1122,30 +1178,25 @@ struct CropView: View {
                     }
                 }
             }
-            .frame(minHeight: 340)
+            .frame(minHeight: 240, maxHeight: .infinity)
             .dropDestination(for: URL.self) { urls, _ in
                 guard let u = urls.first, !model.busy else { return false }
                 Task { await model.open(u) }
                 return true
             }
+            if model.url != nil { TransportBar(model: model) }
+            }
+            if model.url != nil {
+                EditorInspector(model: model).frame(width: 300)
+            }
+            }
 
             if model.url != nil {
                 ClipTimeline(model: model)
                     .disabled(model.busy)
-                TimingBar(model: model)
-                HStack(spacing: 10) {
-                    Picker("Speed", selection: $model.speed) {
-                        Text("1×").tag(1.0); Text("1.25×").tag(1.25); Text("1.5×").tag(1.5)
-                        Text("1.75×").tag(1.75); Text("2×").tag(2.0)
-                    }
-                    .frame(width: 130)
-                    .disabled(model.busy)
-                    .help("Saves the video faster, with voices kept at their normal pitch.")
-                    Spacer()
-                }
-                if !model.blurs.isEmpty {
-                    Text("Each blur has a purple bar under the timeline: drag its ends to choose when it shows, or right-click it for whole video. Blur boxes stay in one spot; they don't follow a face that moves.")
-                        .font(.caption).foregroundStyle(.secondary)
+                SelectionBar(model: model)
+                if model.isCutOut(model.time) {
+                    Text("The playhead is in a part that won't be in the saved video.").font(.caption).foregroundStyle(.red)
                 }
                 Divider()
                 HStack(spacing: 12) {
@@ -1266,7 +1317,9 @@ struct CropView: View {
             openPending()
         }
         .onChange(of: mode) { _, m in model.frameMode = m == .frame }
-        .onChange(of: model.time) { _, _ in Task { await model.refreshFrame() } }
+        .onChange(of: model.time) { _, _ in model.timeChanged() }
+        .onChange(of: model.editState) { _, _ in model.recordChange() }
+        .onDisappear { model.pause() }
         .onChange(of: nav.pendingEdit) { _, _ in openPending() }
     }
 
@@ -1291,6 +1344,14 @@ struct CropView: View {
             parts.append("\(model.blurs.count) blur area\(model.blurs.count == 1 ? "" : "s")" + (timed > 0 ? " (\(timed) for part of the time)" : ""))
         }
         if abs(model.speed - 1) > 0.001 { parts.append(String(format: "%g× speed", model.speed)) }
+        if !model.texts.isEmpty { parts.append("\(model.texts.count) text\(model.texts.count == 1 ? "" : "s")") }
+        if !model.images.isEmpty { parts.append("\(model.images.count) logo\(model.images.count == 1 ? "" : "s")") }
+        if !model.look.isDefault { parts.append("colour") }
+        if model.rotation != 0 { parts.append("rotated \(model.rotation)°") }
+        if model.flipH || model.flipV { parts.append("flipped") }
+        if model.fadeIn > 0 || model.fadeOut > 0 { parts.append("fades") }
+        if model.audioFX.mute { parts.append("no sound") } else if !model.audioFX.isDefault { parts.append("sound cleaned up") }
+        if model.outputHeight > 0 { parts.append("\(model.outputHeight)p") }
         switch mode {
         case .edit: break
         case .compress: parts.append("smaller file")
@@ -1323,13 +1384,21 @@ struct CropCanvas: View {
                              width: model.crop.width * fit.width,
                              height: model.crop.height * fit.height)
             ZStack(alignment: .topLeading) {
-                Image(decorative: image, scale: 1)
-                    .resizable()
-                    .frame(width: fit.width, height: fit.height)
-                    .offset(x: fit.minX, y: fit.minY)
+                if model.isGIF {
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .frame(width: fit.width, height: fit.height)
+                        .offset(x: fit.minX, y: fit.minY)
+                } else {
+                    // The live player: blurs, text, logos, colour and rotation are drawn into the picture.
+                    VideoSurface(player: model.player)
+                        .frame(width: fit.width, height: fit.height)
+                        .offset(x: fit.minX, y: fit.minY)
+                        .onTapGesture(count: 2) { model.togglePlay() }
+                }
 
-                // Blur boxes: a live preview of the blur, plus handles to move and resize, and × to remove.
-                ForEach(model.blurs.indices, id: \.self) { i in
+                // GIFs (no player): a still preview of the blur.
+                if model.isGIF { ForEach(model.blurs.indices, id: \.self) { i in
                     let b = model.blurs[i]
                     let bb = CGRect(x: fit.minX + b.minX * fit.width, y: fit.minY + b.minY * fit.height,
                                     width: b.width * fit.width, height: b.height * fit.height)
@@ -1346,7 +1415,7 @@ struct CropCanvas: View {
                     }
                     .opacity(model.blurActive(i, at: model.time) ? 1 : 0.12)
                     .allowsHitTesting(false)
-                }
+                } }
 
                 // Darken everything outside the crop box.
                 Path { p in
@@ -1446,6 +1515,21 @@ struct CropCanvas: View {
                     .disabled(model.busy)
                 }
 
+                // Text and logo boxes: drag to place them; click to select.
+                ForEach(model.texts) { t in
+                    overlayBox(id: t.id, center: t.style == .banner ? CGPoint(x: 0.5, y: t.center.y) : t.center,
+                               fit: fit, colour: .teal, active: t.range?.contains(model.time) ?? true) { c in
+                        if let k = model.texts.firstIndex(where: { $0.id == t.id }) {
+                            model.texts[k].center = model.texts[k].style == .banner ? CGPoint(x: 0.5, y: c.y) : c
+                        }
+                    }
+                }
+                ForEach(model.images) { o in
+                    overlayBox(id: o.id, center: o.center, fit: fit, colour: .orange, active: o.range?.contains(model.time) ?? true) { c in
+                        if let k = model.images.firstIndex(where: { $0.id == o.id }) { model.images[k].center = c }
+                    }
+                }
+
                 ForEach(CropHandle.allCases, id: \.self) { h in
                     let size: CGFloat = h.isCorner ? 16 : 12
                     Circle()
@@ -1466,6 +1550,33 @@ struct CropCanvas: View {
                         .disabled(model.busy)
                 }
             }
+        }
+    }
+
+    @State private var overlayDrag: CGPoint?
+
+    @ViewBuilder
+    private func overlayBox(id: UUID, center: CGPoint, fit: CGRect, colour: Color, active: Bool,
+                            move: @escaping (CGPoint) -> Void) -> some View {
+        if let sz = model.overlaySize(id) {
+            let w = sz.width * fit.width, h = sz.height * fit.height
+            let selected = model.selectedOverlay == id
+            Rectangle()
+                .fill(Color.white.opacity(0.001))
+                .overlay(Rectangle().stroke(colour.opacity(active ? 1 : 0.4), style: StrokeStyle(lineWidth: selected ? 2.5 : 1.5, dash: selected ? [] : [5, 4])))
+                .frame(width: w, height: h)
+                .position(x: fit.minX + center.x * fit.width, y: fit.minY + center.y * fit.height)
+                .onTapGesture { model.selectedOverlay = id }
+                .gesture(DragGesture(minimumDistance: 1)
+                    .onChanged { v in
+                        let start = overlayDrag ?? center
+                        overlayDrag = start
+                        model.selectedOverlay = id
+                        move(CGPoint(x: min(max(0, start.x + v.translation.width / fit.width), 1),
+                                     y: min(max(0, start.y + v.translation.height / fit.height), 1)))
+                    }
+                    .onEnded { _ in overlayDrag = nil })
+                .disabled(model.busy)
         }
     }
 
