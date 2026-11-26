@@ -536,32 +536,48 @@ extension CropModel {
     func makeWaveform(_ asset: AVURLAsset) {
         waveform = []
         let forURL = url
+        let total = duration
         Task.detached(priority: .utility) {
             guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+                  let fd = try? await track.load(.formatDescriptions).first,
+                  let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd)?.pointee,
                   let reader = try? AVAssetReader(asset: asset) else { return }
+            // Plain 16-bit sound at the recording's own rate and channels: every format can be read like this.
             let out = AVAssetReaderTrackOutput(track: track, outputSettings: [
                 AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false, AVNumberOfChannelsKey: 1, AVSampleRateKey: 2000])
+                AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsNonInterleaved: false])
             out.alwaysCopiesSampleData = false
             guard reader.canAdd(out) else { return }
             reader.add(out)
-            reader.startReading()
-            var samples: [Int16] = []
-            while let buf = out.copyNextSampleBuffer(), let block = CMSampleBufferGetDataBuffer(buf) {
-                let len = CMBlockBufferGetDataLength(block)
-                var chunk = [Int16](repeating: 0, count: len / 2)
-                chunk.withUnsafeMutableBytes { p in _ = CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: len, destination: p.baseAddress!) }
-                samples.append(contentsOf: chunk)
-            }
-            guard !samples.isEmpty else { return }
+            guard reader.startReading() else { return }
+            let channels = max(1, Int(asbd.mChannelsPerFrame))
+            let rate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 44100
             let bins = 2000
-            let per = max(1, samples.count / bins)
-            var peaks = [Float](repeating: 0, count: min(bins, samples.count / per))
-            for i in peaks.indices {
-                var m: Int32 = 0
-                for j in (i * per)..<min(samples.count, (i + 1) * per) { m = max(m, abs(Int32(samples[j]))) }
-                peaks[i] = Float(m) / 32768
+            let expected = max(1.0, total * rate * Double(channels))
+            let perBin = max(1, Int(expected / Double(bins)))
+            var peaks: [Float] = []
+            peaks.reserveCapacity(bins + 10)
+            var current: Int32 = 0, count = 0
+            var chunk: [Int16] = []
+            while let buf = out.copyNextSampleBuffer() {
+                guard let block = CMSampleBufferGetDataBuffer(buf) else { continue }
+                let len = CMBlockBufferGetDataLength(block)
+                guard len >= 2 else { continue }
+                if chunk.count < len / 2 { chunk = [Int16](repeating: 0, count: len / 2) }
+                let n = len / 2
+                let ok = chunk.withUnsafeMutableBytes { p -> Bool in
+                    guard let base = p.baseAddress else { return false }
+                    return CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: n * 2, destination: base) == kCMBlockBufferNoErr
+                }
+                guard ok else { continue }
+                for j in 0..<n {
+                    current = max(current, abs(Int32(chunk[j])))
+                    count += 1
+                    if count >= perBin { peaks.append(Float(current) / 32768); current = 0; count = 0 }
+                }
             }
+            if count > 0 { peaks.append(Float(current) / 32768) }
+            guard !peaks.isEmpty else { return }
             let top = peaks.max() ?? 1
             let norm = peaks.map { top > 0 ? $0 / top : 0 }
             await MainActor.run { [weak self] in

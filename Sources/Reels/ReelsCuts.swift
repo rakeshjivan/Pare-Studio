@@ -163,7 +163,8 @@ struct ClipTimeline: View {
                 }
                 .onChange(of: model.time) { _, t in
                     guard model.zoom > 1.01, model.playing else { return }
-                    proxy.scrollTo("playhead-\(Int(t))", anchor: .center)
+                    let d = max(model.duration, 0.001)
+                    proxy.scrollTo("playhead-\(min(anchorCount(d) - 1, Int(t) / anchorStep(d)))", anchor: .center)
                 }
             }
         }
@@ -179,8 +180,8 @@ struct ClipTimeline: View {
         let lanesTop = waveTop + (model.waveform.isEmpty ? 0 : wave + 2) + 4
         ZStack(alignment: .topLeading) {
             // Scroll anchors so the view can follow the playhead while playing.
-            ForEach(0..<max(1, Int(d) + 1), id: \.self) { s in
-                Color.clear.frame(width: 1, height: 1).offset(x: x(Double(s))).id("playhead-\(s)")
+            ForEach(0..<anchorCount(d), id: \.self) { k in
+                Color.clear.frame(width: 1, height: 1).offset(x: x(Double(k * anchorStep(d)))).id("playhead-\(k)")
             }
             Ruler(duration: d, width: w)
                 .frame(width: w, height: ruler)
@@ -308,6 +309,10 @@ struct ClipTimeline: View {
                 .gesture(DragGesture().onChanged { v in model.pause(); model.time = t(x(model.time) + v.translation.width) })
         }
     }
+
+    /// Scroll markers: about 300 along the video at most, whatever its length.
+    private func anchorStep(_ d: Double) -> Int { max(1, Int(min(d, 100_000)) / 300) }
+    private func anchorCount(_ d: Double) -> Int { max(1, Int(min(d, 100_000)) / anchorStep(d) + 1) }
 
     private func trimHandle(at px: CGFloat, leading: Bool) -> some View {
         RoundedRectangle(cornerRadius: 3)
