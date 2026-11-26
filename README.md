@@ -14,6 +14,20 @@ Everything runs on the Mac; recordings and slides are never uploaded. Claude (op
 
 **Keywords:** in Put Slides to a Recording, add keywords such as `six + weeks`. They're shared by every tool: each find becomes a Camtasia marker and is listed in `Keyword finds.csv`.
 
+## Edit Video
+
+A full editor, with live playback that shows exactly what you'll save.
+
+- **Play** with Space; **J / K / L** shuttle back, pause and forward (press again for faster); **← / →** one frame, **⇧← / ⇧→** one second; Home / End.
+- **Trim** with the yellow handles. **Split** at the playhead (S), click a part, press **Delete** to cut it out; the rest is joined. Or **I / O** to mark a part, then Cut out, Keep only this, Blur during this or Text during this.
+- **Zoom** the timeline; the sound's **waveform** shows the gaps.
+- **Blur** a name or face for the whole video or part of it; **text** (plain, box or banner) and **logos** the same way. Each has a bar on its own timeline lane: drag its ends to choose when it shows.
+- **Colour** (brightness, contrast, saturation), **rotate and flip**, **fade** in and out.
+- **Sound**: volume, mute, even out the loudness, reduce background noise, fade in and out.
+- **Speed** (the preview plays at that speed), **output size** (1080p, 720p, 480p), **Save Frame** as an image.
+- **Undo / Redo** (⌘Z / ⇧⌘Z) for every change.
+- **Save as** a video, a smaller file, a GIF or a framed bubble.
+
 ## Turn a Video into Slides
 
 1. Drop in the video.
