@@ -366,7 +366,9 @@ extension CropModel {
 
     /// The playhead moved (scrubbing, buttons): show that frame.
     func timeChanged() {
-        if fromPlayer { return }
+        // While playing, the playhead follows the player: never seek back to it (that caused a stutter loop).
+        // Scrubbing, stepping and clicking all pause first, so they still move the picture.
+        if fromPlayer || playing { return }
         if isGIF { Task { await refreshFrame() }; return }
         seekPlayer(time)
     }
