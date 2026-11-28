@@ -402,11 +402,15 @@ final class EditorModel: ObservableObject {
         projectChanged()
     }
 
-    private var snapPoints: [Double] { [0, time] + project.tracks.flatMap(\.clips).flatMap { [$0.start, $0.end] } }
+    private func snapTargets(ignoring id: UUID) -> [Double] {
+        var out: [Double] = [0, time]
+        for t in project.tracks { for c in t.clips where c.id != id { out.append(c.start); out.append(c.end) } }
+        return out
+    }
 
     private func snap(_ s: Double, length: Double, ignoring id: UUID) -> Double {
         let tol = 8 / zoom
-        let others = [0, time] + project.tracks.flatMap(\.clips).filter { $0.id != id }.flatMap { [$0.start, $0.end] }
+        let others = snapTargets(ignoring: id)
         for p in others {
             if abs(s - p) < tol { return p }
             if abs(s + length - p) < tol { return p - length }
@@ -416,7 +420,7 @@ final class EditorModel: ObservableObject {
 
     private func snapEdge(_ x: Double, ignoring id: UUID) -> Double {
         let tol = 8 / zoom
-        let others = [0, time] + project.tracks.flatMap(\.clips).filter { $0.id != id }.flatMap { [$0.start, $0.end] }
+        let others = snapTargets(ignoring: id)
         return others.first { abs($0 - x) < tol } ?? x
     }
 
