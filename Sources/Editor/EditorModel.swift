@@ -310,7 +310,7 @@ final class EditorModel: ObservableObject {
         project.tracks[i].clips.append(c)
         project.tracks[i].clips.sort { $0.start < $1.start }
         selectedClip = c.id
-        if project.media.count == 1 || project.duration == length {
+        if project.tracks.reduce(0, { $0 + $1.clips.count }) == 1 {
             // First clip: match the canvas to it.
             if m.kind == .video, m.width > 0, m.height > 0 {
                 project.canvas = m.height > m.width ? ProjectCanvas(width: 1080, height: 1920)
