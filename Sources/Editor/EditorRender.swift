@@ -181,6 +181,7 @@ struct BuiltComposition: @unchecked Sendable {
     let composition: AVMutableComposition
     let videoComposition: AVVideoComposition?
     let audioMix: AVAudioMix?
+    var keep: [AnyObject] = []          // the source files, held for as long as the preview lives
 }
 
 enum CompositionBuilder {
@@ -209,7 +210,7 @@ enum CompositionBuilder {
             if t > cursor + 0.001 { track.insertEmptyTimeRange(CMTimeRange(start: ct(cursor), duration: ct(t - cursor))) }
             do {
                 try track.insertTimeRange(CMTimeRange(start: ct(from), duration: ct(length)), of: src, at: ct(t))
-            } catch { return false }
+            } catch { CompositionBuilder.lastProblem = "couldn't copy a clip: \(error.localizedDescription)"; return false }
             var placed = length
             if let s = stretchTo {
                 track.scaleTimeRange(CMTimeRange(start: ct(t), duration: ct(length)), toDuration: ct(s))
@@ -221,6 +222,7 @@ enum CompositionBuilder {
     }
 
     struct Source {
+        var asset: AVURLAsset?          // kept alive: a track can't be copied once its asset is gone
         var video: AVAssetTrack?
         var audio: AVAssetTrack?
         var videoEnd: Double = 0
@@ -236,6 +238,7 @@ enum CompositionBuilder {
             return s
         }
         let asset = AVURLAsset(url: m.url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        s.asset = asset
         if let v = try? await asset.loadTracks(withMediaType: .video).first {
             s.video = v
             s.transform = (try? await v.load(.preferredTransform)) ?? .identity
@@ -364,15 +367,26 @@ enum CompositionBuilder {
         }
 
         // A black picture under everything for the whole length, so there is always a frame.
-        guard let blackURL = await blackClip(),
-              let black = try? await AVURLAsset(url: blackURL).loadTracks(withMediaType: .video).first,
+        var blackAsset: AVURLAsset?
+        var black: AVAssetTrack?
+        if let u = await blackClip() {
+            blackAsset = AVURLAsset(url: u)
+            black = try? await blackAsset?.loadTracks(withMediaType: .video).first
+        }
+        // If the black clip couldn't be made, any video will do: the compositor never draws this track.
+        if black == nil, let v = sources.values.first(where: { $0.video != nil }) { black = v.video; blackAsset = v.asset }
+        guard let black,
               let spacer = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
             lastProblem = "couldn't make the black background clip"; return nil
         }
         do {
-            try spacer.insertTimeRange(CMTimeRange(start: .zero, duration: ct(1)), of: black, at: .zero)
-            spacer.scaleTimeRange(CMTimeRange(start: .zero, duration: ct(1)), toDuration: ct(total))
+            let r = try await black.load(.timeRange)
+            let piece = CMTimeMinimum(r.duration, ct(1))
+            try spacer.insertTimeRange(CMTimeRange(start: r.start, duration: piece), of: black, at: .zero)
+            spacer.scaleTimeRange(CMTimeRange(start: .zero, duration: piece), toDuration: ct(total))
         } catch { lastProblem = "background clip: \(error.localizedDescription)"; return nil }
+        withExtendedLifetime(blackAsset) {}
+        withExtendedLifetime(sources) {}
 
         // Drop tracks nothing went into.
         for t in comp.tracks where t.segments.isEmpty { comp.removeTrack(t) }
@@ -388,7 +402,9 @@ enum CompositionBuilder {
 
         let mix = AVMutableAudioMix()
         mix.inputParameters = audioLanes.compactMap(\.volume)
-        return BuiltComposition(composition: comp, videoComposition: vc, audioMix: mix)
+        var keep: [AnyObject] = sources.values.compactMap(\.asset)
+        if let blackAsset { keep.append(blackAsset) }
+        return BuiltComposition(composition: comp, videoComposition: vc, audioMix: mix, keep: keep)
     }
 
     /// A one-second black movie, made once and kept.

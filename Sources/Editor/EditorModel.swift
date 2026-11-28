@@ -108,6 +108,7 @@ final class EditorModel: ObservableObject {
     private var fromPlayer = false
     private var rebuildTask: Task<Void, Never>?
     private var builtProject: EditorProject?
+    private var keepAlive: [AnyObject] = []
     private var undoStack: [EditorProject] = []
     private var redoStack: [EditorProject] = []
     private var lastProject: EditorProject?
@@ -194,7 +195,9 @@ final class EditorModel: ObservableObject {
         item.videoComposition = built.videoComposition
         item.audioMix = built.audioMix
         player.replaceCurrentItem(with: item)
+        keepAlive = built.keep
         builtProject = p
+        if let why = CompositionBuilder.lastProblem { problem = "Part of the preview is missing: \(why)." }
         seek(at)
         if wasPlaying { player.play() }
         // Say so if AVFoundation refuses the preview, rather than showing a blank screen.
