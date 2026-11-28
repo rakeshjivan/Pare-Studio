@@ -5,6 +5,7 @@ One Mac app for video, guides, slides and transcripts. The home screen asks what
 | Tool | What it does |
 |---|---|
 | **Download & Edit Video** | Save videos from YouTube, Vimeo, webinars, Zoom and more. **Edit Video** does trim, crop, blur and speed together, then saves once as a video, a smaller file, a GIF or a framed bubble. Each download has an **Edit…** button (from Pare Reels). |
+| **Video Editor** | A multi-track editor in the spirit of Camtasia: clips, sound and pictures on tracks, transitions (crossfade, dip to black, wipe, slide), picture-in-picture, live preview, MP4 export. Projects save themselves. Opens Camtasia projects (.cmproj / .tscproj). |
 | **Make a How-To Guide** | Record yourself doing a task in any app. Get a step-by-step guide (PDF, Word, web page, GIF), a narrated tutorial video, or a Camtasia project (from Pare Guide). |
 | **Turn a Video into Slides** | Finds every slide in a recorded talk or webinar. Saves a PowerPoint (what was said becomes the speaker notes), a PDF, the slide images, a transcript, or a Camtasia project with the slides timed to the sound. |
 | **Put Slides to a Recording** | You have the recording and the slide deck. Pare Studio listens and puts each slide on screen at the right moment, for a batch of recordings, then exports Camtasia projects or MP4s (from Pare Slides). |
@@ -27,6 +28,15 @@ A full editor, with live playback that shows exactly what you'll save.
 - **Speed** (the preview plays at that speed), **output size** (1080p, 720p, 480p), **Save Frame** as an image.
 - **Undo / Redo** (⌘Z / ⇧⌘Z) for every change.
 - **Save as** a video, a smaller file, a GIF or a framed bubble.
+
+## Video Editor
+
+- Drop videos, sound and pictures in (or **Add Media**). Drag them from the media bin onto a track, or double-click to add at the end.
+- Higher tracks show on top. Use **Size** and **Left / right / Up / down** in the inspector for picture-in-picture (**Corner bubble** does a webcam corner in one click).
+- Drag a clip to move it (also up or down to another track); drag its edges to trim. **S** splits at the playhead, **Delete** removes, **⌘Z** undoes.
+- Pick a **Transition in** for any clip. It plays from the clip before it on the same track, or from black.
+- Projects save themselves to *~/Library/Application Support/Pare Studio/Projects* and show under Recent projects.
+- **Open…** a Camtasia project to bring in its media, tracks, trims, groups and transitions. Callouts, behaviours, cursor effects, device frames and speed changes are Camtasia-only: the editor lists what it left out.
 
 ## Turn a Video into Slides
 

@@ -68,13 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Where we are
 
 enum Screen: String, CaseIterable, Identifiable {
-    case home, download, guide, videoSlides, fitSlides, transcribe
+    case home, download, editor, guide, videoSlides, fitSlides, transcribe
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .home: return "Pare Studio"
         case .download: return "Download & Edit Video"
+        case .editor: return "Video Editor"
         case .guide: return "Make a How-To Guide"
         case .videoSlides: return "Turn a Video into Slides"
         case .fitSlides: return "Put Slides to a Recording"
@@ -86,6 +87,7 @@ enum Screen: String, CaseIterable, Identifiable {
         switch self {
         case .home: return "house"
         case .download: return "arrow.down.circle.fill"
+        case .editor: return "film.stack.fill"
         case .guide: return "list.number"
         case .videoSlides: return "rectangle.stack.badge.play.fill"
         case .fitSlides: return "rectangle.on.rectangle.angled"
@@ -97,6 +99,7 @@ enum Screen: String, CaseIterable, Identifiable {
         switch self {
         case .home: return .accentColor
         case .download: return Color(red: 0.16, green: 0.52, blue: 0.86)
+        case .editor: return Color(red: 0.90, green: 0.36, blue: 0.56)
         case .guide: return Color(red: 0.86, green: 0.30, blue: 0.32)
         case .videoSlides: return Color(red: 0.55, green: 0.36, blue: 0.84)
         case .fitSlides: return Color(red: 0.11, green: 0.62, blue: 0.58)
@@ -108,6 +111,7 @@ enum Screen: String, CaseIterable, Identifiable {
         switch self {
         case .home: return ""
         case .download: return "Save a video, or trim, crop, blur and shrink one"
+        case .editor: return "Put several clips, sound and pictures together"
         case .guide: return "Show someone how to do something on a Mac"
         case .videoSlides: return "Get the slides out of a recorded talk"
         case .fitSlides: return "I have a recording and the slide deck"
@@ -120,6 +124,8 @@ enum Screen: String, CaseIterable, Identifiable {
         case .home: return ""
         case .download:
             return "Download from YouTube, Vimeo, webinars, Zoom and more. Edit any video in one go: trim, crop, blur, speed, then save as a video, a smaller file, a GIF or a framed bubble."
+        case .editor:
+            return "A multi-track editor like Camtasia: clips on tracks, transitions, picture-in-picture, live preview, MP4 export. Opens Camtasia projects too."
         case .guide:
             return "Record yourself doing a task in any app. Get a step-by-step guide (PDF, Word, web page), a narrated tutorial video, or a Camtasia project."
         case .videoSlides:
@@ -146,7 +152,7 @@ struct StudioRoot: View {
     @ObservedObject private var slides = Session.shared
     @ObservedObject private var reels = ReelsHome.model
 
-    private var busy: Bool { recorder.isBusy || slides.busy || reels.isRunning || VideoSlides.shared.busy || TranscribeModel.shared.busy }
+    private var busy: Bool { recorder.isBusy || slides.busy || reels.isRunning || VideoSlides.shared.busy || TranscribeModel.shared.busy || EditorModel.shared.busy }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -157,6 +163,7 @@ struct StudioRoot: View {
                 switch nav.screen {
                 case .home: StudioHomeView()
                 case .download: ReelsHome()
+                case .editor: ProjectEditorView()
                 case .guide: RootView()
                 case .videoSlides: VideoSlidesView()
                 case .fitSlides: SlidesHome()
@@ -208,7 +215,7 @@ struct ClaudeChip: View {
 // MARK: - Home
 
 struct StudioHomeView: View {
-    private let tools: [Screen] = [.download, .guide, .videoSlides, .fitSlides, .transcribe]
+    private let tools: [Screen] = [.download, .editor, .guide, .videoSlides, .fitSlides, .transcribe]
     private let columns = [GridItem(.adaptive(minimum: 300, maximum: 420), spacing: 18)]
 
     var body: some View {
