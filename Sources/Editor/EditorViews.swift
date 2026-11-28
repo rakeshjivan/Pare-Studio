@@ -294,6 +294,7 @@ struct ClipInspector: View {
 
     @ViewBuilder
     private func clipPanel(_ c: Clip, _ item: MediaItem) -> some View {
+        let onSoundTrack = m.location(of: c.id).map { m.project.tracks[$0.track].isAudio } ?? false
         Text(item.name).font(.headline).lineLimit(2)
         Text("Starts \(PreviewPane.clock(c.start)) · lasts \(PreviewPane.clock(c.duration))")
             .font(.callout).foregroundStyle(.secondary)
@@ -313,7 +314,15 @@ struct ClipInspector: View {
             .padding(4)
         }
 
-        if item.hasAudio || item.kind == .audio {
+        if c.videoOnly == true && !onSoundTrack {
+            GroupBox("Sound") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("This video's sound is its own clip on a sound track. Click it there to change its volume.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(4)
+            }
+        } else if item.hasAudio || item.kind == .audio {
             GroupBox("Sound") {
                 VStack(alignment: .leading, spacing: 8) {
                     slider("Volume", bind({ $0.volume }, { $0.volume = $1 }), 0...2, percent: true)
@@ -323,7 +332,14 @@ struct ClipInspector: View {
             }
         }
 
-        if item.kind != .audio {
+        if c.linkID != nil {
+            Button { m.unlinkSelected() } label: { Label("Unlink picture and sound", systemImage: "link.badge.plus") }
+                .help("Linked clips move, trim and split together. Unlink to move them separately.")
+        } else if !onSoundTrack, c.videoOnly != true, item.hasAudio {
+            Button { m.separateSound(c.id) } label: { Label("Separate the sound", systemImage: "waveform.badge.plus") }
+        }
+
+        if item.kind != .audio && !onSoundTrack {
             GroupBox("Picture") {
                 VStack(alignment: .leading, spacing: 8) {
                     slider("Opacity", bind({ $0.opacity }, { $0.opacity = $1 }), 0...1, percent: true)
@@ -606,7 +622,12 @@ struct ClipBlock: View {
 
     private var item: MediaItem? { m.project.item(clip.mediaID) }
     private var selected: Bool { m.selectedClip == clip.id }
+    private var partnerSelected: Bool {
+        guard let link = clip.linkID, let s = m.selected, s.id != clip.id else { return false }
+        return s.linkID == link
+    }
     private var colour: Color {
+        if track.isAudio { return Color(red: 0.18, green: 0.62, blue: 0.45) }
         switch item?.kind {
         case .audio: return Color(red: 0.18, green: 0.62, blue: 0.45)
         case .image: return Color(red: 0.80, green: 0.52, blue: 0.18)
@@ -619,7 +640,9 @@ struct ClipBlock: View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 6).fill(colour.gradient)
             HStack(spacing: 6) {
-                if let item, let t = m.thumbs[item.id], w > 70 {
+                if track.isAudio, w > 40 {
+                    Image(systemName: "waveform").foregroundStyle(.white.opacity(0.85))
+                } else if let item, let t = m.thumbs[item.id], w > 70 {
                     Image(decorative: t, scale: 1).resizable().aspectRatio(contentMode: .fill)
                         .frame(width: 60, height: laneHeight - 14).clipped().cornerRadius(4)
                 }
@@ -629,6 +652,7 @@ struct ClipBlock: View {
                 }
                 .foregroundStyle(.white)
                 Spacer(minLength: 0)
+                if clip.linkID != nil { Image(systemName: "link").font(.caption2).foregroundStyle(.white.opacity(0.8)) }
                 if clip.muted { Image(systemName: "speaker.slash.fill").font(.caption).foregroundStyle(.white) }
             }
             .padding(.horizontal, 7)
@@ -645,7 +669,8 @@ struct ClipBlock: View {
         }
         .frame(width: w, height: laneHeight - 8)
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(selected ? Color.white : Color.black.opacity(0.25), lineWidth: selected ? 2.5 : 1))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(selected ? Color.white : partnerSelected ? Color.white.opacity(0.6) : Color.black.opacity(0.25),
+                                                                lineWidth: selected ? 2.5 : partnerSelected ? 1.5 : 1))
         .overlay(alignment: .leading) { handle(leading: true) }
         .overlay(alignment: .trailing) { handle(leading: false) }
         .offset(x: clip.start * m.zoom, y: 4)
@@ -665,6 +690,11 @@ struct ClipBlock: View {
                 }
             }
             Button(clip.muted ? "Unmute" : "Mute") { m.selectedClip = clip.id; m.updateSelected { $0.muted.toggle() } }
+            if clip.linkID != nil {
+                Button("Unlink picture and sound") { m.selectedClip = clip.id; m.unlinkSelected() }
+            } else if !track.isAudio, clip.videoOnly != true, item?.hasAudio == true {
+                Button("Separate the sound onto a sound track") { m.separateSound(clip.id) }
+            }
             Divider()
             Button("Delete", role: .destructive) { m.selectedClip = clip.id; m.deleteSelected() }
         }

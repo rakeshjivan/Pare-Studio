@@ -41,6 +41,8 @@ struct Clip: Identifiable, Codable, Equatable {
     var offsetY: Double = 0
     var transition: TransitionKind = .none   // into this clip, from whatever is before it
     var transitionDuration: Double = 1
+    var linkID: UUID?             // clips that move, trim and split together (a video and its sound)
+    var videoOnly: Bool?          // a video clip whose sound lives on its own clip on a sound track
     var end: Double { start + duration }
 }
 
@@ -334,7 +336,18 @@ final class EditorModel: ObservableObject {
         guard let i = ti else { return }
         let length = m.kind == .image ? 5 : m.duration
         let startAt = t ?? (project.tracks[i].clips.map(\.end).max() ?? 0)
-        let c = Clip(mediaID: m.id, start: max(0, startAt), duration: length)
+        var c = Clip(mediaID: m.id, start: max(0, startAt), duration: length)
+        if m.kind == .video, m.hasAudio {
+            // Like Camtasia: the sound goes on its own clip on a sound track, linked to the picture.
+            let link = UUID()
+            c.linkID = link
+            c.videoOnly = true
+            var a = Clip(mediaID: m.id, start: c.start, duration: length)
+            a.linkID = link
+            let ai = freeSoundTrack(from: c.start, to: c.end)
+            project.tracks[ai].clips.append(a)
+            project.tracks[ai].clips.sort { $0.start < $1.start }
+        }
         project.tracks[i].clips.append(c)
         project.tracks[i].clips.sort { $0.start < $1.start }
         selectedClip = c.id
@@ -344,6 +357,63 @@ final class EditorModel: ObservableObject {
                 project.canvas = m.height > m.width ? ProjectCanvas(width: 1080, height: 1920)
                     : (abs(m.width / m.height - 1) < 0.05 ? ProjectCanvas(width: 1080, height: 1080) : ProjectCanvas(width: 1920, height: 1080))
             }
+        }
+        projectChanged()
+    }
+
+    /// A sound track with nothing in the way between two times (a new one if they're all busy).
+    private func freeSoundTrack(from a: Double, to b: Double) -> Int {
+        if let i = project.tracks.firstIndex(where: { t in t.isAudio && !t.clips.contains { $0.start < b - 0.01 && $0.end > a + 0.01 } }) { return i }
+        let n = project.tracks.filter(\.isAudio).count + 1
+        project.tracks.append(Track(name: n == 1 ? "Audio" : "Audio \(n)", isAudio: true))
+        return project.tracks.count - 1
+    }
+
+    /// The other clips linked to this one.
+    func partners(of id: UUID) -> [UUID] {
+        guard let l = location(of: id), let link = project.tracks[l.track].clips[l.clip].linkID else { return [] }
+        return project.tracks.flatMap(\.clips).filter { $0.linkID == link && $0.id != id }.map(\.id)
+    }
+
+    /// Gives linked clips the same timing (and transition) as this one.
+    private func syncPartners(of id: UUID) {
+        guard let l = location(of: id) else { return }
+        let c = project.tracks[l.track].clips[l.clip]
+        for pid in partners(of: id) {
+            guard let pl = location(of: pid) else { continue }
+            project.tracks[pl.track].clips[pl.clip].start = c.start
+            project.tracks[pl.track].clips[pl.clip].inPoint = c.inPoint
+            project.tracks[pl.track].clips[pl.clip].duration = c.duration
+            project.tracks[pl.track].clips[pl.clip].transition = c.transition
+            project.tracks[pl.track].clips[pl.clip].transitionDuration = c.transitionDuration
+            project.tracks[pl.track].clips.sort { $0.start < $1.start }
+        }
+    }
+
+    /// Moves a video clip's own sound onto a linked clip on a sound track.
+    func separateSound(_ id: UUID) {
+        guard let l = location(of: id), !project.tracks[l.track].isAudio else { return }
+        var c = project.tracks[l.track].clips[l.clip]
+        guard let m = project.item(c.mediaID), m.hasAudio, c.videoOnly != true else { return }
+        let link = c.linkID ?? UUID()
+        c.linkID = link
+        c.videoOnly = true
+        project.tracks[l.track].clips[l.clip] = c
+        var a = Clip(mediaID: m.id, start: c.start, inPoint: c.inPoint, duration: c.duration, volume: c.volume, muted: c.muted)
+        a.linkID = link
+        let ai = freeSoundTrack(from: c.start, to: c.end)
+        project.tracks[ai].clips.append(a)
+        project.tracks[ai].clips.sort { $0.start < $1.start }
+        projectChanged()
+    }
+
+    var isLinked: Bool { selectedClip.map { !partners(of: $0).isEmpty } ?? false }
+
+    /// Lets the picture and sound of the selected clip be moved separately.
+    func unlinkSelected() {
+        guard let id = selectedClip else { return }
+        for cid in [id] + partners(of: id) {
+            if let l = location(of: cid) { project.tracks[l.track].clips[l.clip].linkID = nil }
         }
         projectChanged()
     }
@@ -360,12 +430,15 @@ final class EditorModel: ObservableObject {
     func updateSelected(_ f: (inout Clip) -> Void) {
         guard let id = selectedClip, let l = location(of: id) else { return }
         f(&project.tracks[l.track].clips[l.clip])
+        syncPartners(of: id)
         projectChanged()
     }
 
     func deleteSelected() {
-        guard let id = selectedClip, let l = location(of: id) else { return }
-        project.tracks[l.track].clips.remove(at: l.clip)
+        guard let id = selectedClip else { return }
+        for cid in [id] + partners(of: id) {
+            if let l = location(of: cid) { project.tracks[l.track].clips.remove(at: l.clip) }
+        }
         selectedClip = nil
         projectChanged()
     }
@@ -381,19 +454,27 @@ final class EditorModel: ObservableObject {
             }
         }
         guard let l = target else { return }
-        var a = project.tracks[l.track].clips[l.clip]
-        let cut = t - a.start
-        guard cut > 0.05, a.duration - cut > 0.05 else { return }
-        var b = a
-        b.id = UUID()
-        b.start = t
-        b.inPoint = a.inPoint + cut
-        b.duration = a.duration - cut
-        b.transition = .none
-        a.duration = cut
-        project.tracks[l.track].clips[l.clip] = a
-        project.tracks[l.track].clips.insert(b, at: l.clip + 1)
-        selectedClip = b.id
+        let first = project.tracks[l.track].clips[l.clip]
+        let cut = t - first.start
+        guard cut > 0.05, first.duration - cut > 0.05 else { return }
+        let newLink: UUID? = first.linkID == nil ? nil : UUID()
+        var selectedHalf: UUID?
+        for cid in [first.id] + partners(of: first.id) {
+            guard let cl = location(of: cid) else { continue }
+            var a = project.tracks[cl.track].clips[cl.clip]
+            var b = a
+            b.id = UUID()
+            b.start = t
+            b.inPoint = a.inPoint + cut
+            b.duration = a.duration - cut
+            b.transition = .none
+            b.linkID = newLink
+            a.duration = cut
+            project.tracks[cl.track].clips[cl.clip] = a
+            project.tracks[cl.track].clips.insert(b, at: cl.clip + 1)
+            if cid == first.id { selectedHalf = b.id }
+        }
+        selectedClip = selectedHalf
         projectChanged()
     }
 
@@ -404,11 +485,13 @@ final class EditorModel: ObservableObject {
         var s = max(0, start)
         if snapping { s = snap(s, length: c.duration, ignoring: id) }
         c.start = s
+        let linked = partners(of: id)
         var dest = l.track
         if let nt = newTrack, project.tracks.indices.contains(nt), project.tracks[nt].isAudio == project.tracks[l.track].isAudio { dest = nt }
         project.tracks[l.track].clips.remove(at: l.clip)
         project.tracks[dest].clips.append(c)
         project.tracks[dest].clips.sort { $0.start < $1.start }
+        if !linked.isEmpty { syncPartners(of: id) }
         projectChanged()
     }
 
@@ -427,12 +510,14 @@ final class EditorModel: ObservableObject {
             c.duration = min(max(0.1, x - c.start), maxLen - c.inPoint)
         }
         project.tracks[l.track].clips[l.clip] = c
+        syncPartners(of: id)
         projectChanged()
     }
 
     private func snapTargets(ignoring id: UUID) -> [Double] {
         var out: [Double] = [0, time]
-        for t in project.tracks { for c in t.clips where c.id != id { out.append(c.start); out.append(c.end) } }
+        let skip = Set([id] + partners(of: id))
+        for t in project.tracks { for c in t.clips where !skip.contains(c.id) { out.append(c.start); out.append(c.end) } }
         return out
     }
 

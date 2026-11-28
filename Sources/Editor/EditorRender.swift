@@ -276,7 +276,7 @@ enum CompositionBuilder {
                 vLanes = [newLane(.video), newLane(.video)].compactMap { $0 }
             }
             var aLanes: [Lane] = []
-            if clips.contains(where: { sources[$0.mediaID]?.audio != nil }) {
+            if clips.contains(where: { sources[$0.mediaID]?.audio != nil && !($0.videoOnly == true && !track.isAudio) }) {
                 aLanes = [newLane(.audio), newLane(.audio)].compactMap { $0 }
                 for l in aLanes { l.volume = AVMutableAudioMixInputParameters(track: l.track) }
                 audioLanes += aLanes
@@ -316,7 +316,7 @@ enum CompositionBuilder {
                         if ps.videoEnd - out >= need { other.put(v, from: out, length: need, at: prev.end) }
                         else { other.put(v, from: max(0, out - 1.0 / 30), length: 1.0 / 30, at: prev.end, stretchTo: need) }
                     }
-                    if let a = ps.audio, aLanes.indices.contains(1 - lane), ps.audioEnd - out >= need {
+                    if let a = ps.audio, !(prev.videoOnly == true && !track.isAudio), aLanes.indices.contains(1 - lane), ps.audioEnd - out >= need {
                         let al = aLanes[1 - lane]
                         let pv = (prev.muted || track.muted) ? 0 : Float(prev.volume)
                         if al.put(a, from: out, length: need, at: prev.end) {
@@ -347,7 +347,7 @@ enum CompositionBuilder {
                 }
 
                 // The clip's sound.
-                if let a = src.audio, aLanes.indices.contains(lane) {
+                if let a = src.audio, !(c.videoOnly == true && !track.isAudio), aLanes.indices.contains(lane) {
                     let al = aLanes[lane]
                     let len = min(c.duration, src.audioEnd - c.inPoint)
                     if len > 0.01, al.put(a, from: c.inPoint, length: len, at: c.start) {
