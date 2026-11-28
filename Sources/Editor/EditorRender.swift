@@ -278,7 +278,7 @@ enum CompositionBuilder {
             var aLanes: [Lane] = []
             if clips.contains(where: { sources[$0.mediaID]?.audio != nil }) {
                 aLanes = [newLane(.audio), newLane(.audio)].compactMap { $0 }
-                for l in aLanes { l.volume = AVMutableAudioMixInputParameters(track: l.track); l.volume?.setVolume(0, at: .zero) }
+                for l in aLanes { l.volume = AVMutableAudioMixInputParameters(track: l.track) }
                 audioLanes += aLanes
             }
             var layer: [Placement] = []
@@ -322,7 +322,6 @@ enum CompositionBuilder {
                         if al.put(a, from: out, length: need, at: prev.end) {
                             al.volume?.setVolumeRamp(fromStartVolume: pv, toEndVolume: 0,
                                                      timeRange: CMTimeRange(start: ct(prev.end), duration: ct(need)))
-                            al.volume?.setVolume(0, at: ct(prev.end + need))
                         }
                     }
                 }
@@ -355,11 +354,9 @@ enum CompositionBuilder {
                         if let tin, tin.duration > 0 {
                             al.volume?.setVolumeRamp(fromStartVolume: 0, toEndVolume: vol,
                                                      timeRange: CMTimeRange(start: ct(c.start), duration: ct(tin.duration)))
-                            al.volume?.setVolume(vol, at: ct(c.start + tin.duration))
                         } else {
                             al.volume?.setVolume(vol, at: ct(c.start))
                         }
-                        al.volume?.setVolume(0, at: ct(c.start + len))
                     }
                 }
             }
