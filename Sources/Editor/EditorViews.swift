@@ -36,9 +36,7 @@ struct ProjectEditorView: View {
                 for p in providers {
                     if let u = await Self.url(from: p) { urls.append(u) }
                 }
-                let wasEmpty = m.project.tracks.allSatisfy { $0.clips.isEmpty }
-                let added = await m.add(urls)
-                if wasEmpty { for item in added { m.place(item) } }
+                await m.add(urls)
             }
             return true
         }
@@ -232,6 +230,15 @@ struct PreviewPane: View {
                     .aspectRatio(CGFloat(m.project.canvas.width) / CGFloat(m.project.canvas.height), contentMode: .fit)
                     .padding(10)
                     .shadow(radius: 4)
+                if m.duration <= 0 {
+                    VStack(spacing: 8) {
+                        Image(systemName: "arrow.down").font(.title)
+                        Text("Drag something from Media onto the timeline below,\nor double-click it, to see it here.")
+                            .multilineTextAlignment(.center)
+                    }
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding()
+                }
             }
             Divider()
             HStack(spacing: 14) {

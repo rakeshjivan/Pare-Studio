@@ -181,9 +181,13 @@ final class EditorModel: ObservableObject {
         let p = project
         let wasPlaying = playing
         let at = time
+        CompositionBuilder.lastProblem = nil
         guard let built = await CompositionBuilder.build(p, thumbs: false) else {
             player.replaceCurrentItem(with: nil)
             builtProject = p
+            if p.duration > 0.05 {
+                problem = "The preview couldn't be made: " + (CompositionBuilder.lastProblem ?? "unknown reason") + "."
+            }
             return
         }
         let item = AVPlayerItem(asset: built.composition)
@@ -193,6 +197,21 @@ final class EditorModel: ObservableObject {
         builtProject = p
         seek(at)
         if wasPlaying { player.play() }
+        // Say so if AVFoundation refuses the preview, rather than showing a blank screen.
+        Task { [weak item] in
+            for _ in 0..<40 {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let item, self.player.currentItem === item else { return }
+                if item.status == .readyToPlay { return }
+                if item.status == .failed {
+                    let e = item.error as NSError?
+                    self.problem = "The preview couldn't play: \(e?.localizedDescription ?? "unknown error")"
+                        + (e?.localizedFailureReason.map { " (\($0))" } ?? "")
+                        + (e.map { " [\($0.domain) \($0.code)]" } ?? "")
+                    return
+                }
+            }
+        }
     }
 
     func timeChanged() {
@@ -242,6 +261,12 @@ final class EditorModel: ObservableObject {
             makeThumb(item)
         }
         projectChanged()
+        // Nothing on the timeline yet: put what was just added on it, one after another.
+        if project.tracks.allSatisfy({ $0.clips.isEmpty }) {
+            for item in added { place(item) }
+            selectedClip = nil
+            if !added.isEmpty { status = "Added to the timeline. Press Space to play." }
+        }
         return added
     }
 

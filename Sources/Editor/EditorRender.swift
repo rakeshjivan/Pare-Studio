@@ -184,6 +184,9 @@ struct BuiltComposition: @unchecked Sendable {
 }
 
 enum CompositionBuilder {
+    /// Why the last build gave up, for the message the person sees.
+    nonisolated(unsafe) static var lastProblem: String?
+
     static func ct(_ s: Double) -> CMTime { CMTime(seconds: max(0, s), preferredTimescale: 600) }
 
     /// One composition track being filled from left to right.
@@ -363,11 +366,13 @@ enum CompositionBuilder {
         // A black picture under everything for the whole length, so there is always a frame.
         guard let blackURL = await blackClip(),
               let black = try? await AVURLAsset(url: blackURL).loadTracks(withMediaType: .video).first,
-              let spacer = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
+              let spacer = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            lastProblem = "couldn't make the black background clip"; return nil
+        }
         do {
             try spacer.insertTimeRange(CMTimeRange(start: .zero, duration: ct(1)), of: black, at: .zero)
             spacer.scaleTimeRange(CMTimeRange(start: .zero, duration: ct(1)), toDuration: ct(total))
-        } catch { return nil }
+        } catch { lastProblem = "background clip: \(error.localizedDescription)"; return nil }
 
         // Drop tracks nothing went into.
         for t in comp.tracks where t.segments.isEmpty { comp.removeTrack(t) }
